@@ -377,6 +377,11 @@ enum {
 };
 #endif
 
+typedef struct XtensaIRQController {
+    void *opaque;
+    void *(*get_irq)(void *opaque, unsigned irq);
+} XtensaIRQController;
+
 typedef struct CPUXtensaState {
     const XtensaConfig *config;
     uint32_t regs[16];
@@ -409,6 +414,8 @@ typedef struct CPUXtensaState {
 
     /* Watchpoints for DBREAK registers */
     struct CPUWatchpoint *cpu_watchpoint[MAX_NDBREAK];
+
+    XtensaIRQController irq_controller;
 
     CPU_COMMON
 } CPUXtensaState;
@@ -449,6 +456,8 @@ int xtensa_cpu_gdb_write_register(CPUState *cpu, uint8_t *buf, int reg);
 void xtensa_cpu_do_unaligned_access(CPUState *cpu, vaddr addr,
                                     MMUAccessType access_type,
                                     int mmu_idx, uintptr_t retaddr);
+struct XtensaMx;
+typedef struct XtensaMx XtensaMx;
 
 #define cpu_signal_handler cpu_xtensa_signal_handler
 #define cpu_list xtensa_cpu_list
@@ -463,13 +472,22 @@ XtensaCPU *cpu_xtensa_init(const char *cpu_model);
 
 #define cpu_init(cpu_model) CPU(cpu_xtensa_init(cpu_model))
 
+XtensaMx *xtensa_mx_init(unsigned n_extint);
+void xtensa_mx_reset(void *opaque);
+void xtensa_mx_register_env(XtensaMx *mx, CPUXtensaState *env);
+XtensaIRQController *xtensa_mx_get_irq_controller(XtensaMx *mx);
+static inline XtensaIRQController *xtensa_env_get_irq_controller(
+        CPUXtensaState *env)
+{
+    return &env->irq_controller;
+}
+
 void xtensa_translate_init(void);
 void xtensa_breakpoint_handler(CPUState *cs);
 void xtensa_finalize_config(XtensaConfig *config);
 void xtensa_register_core(XtensaConfigList *node);
 void check_interrupts(CPUXtensaState *s);
 void xtensa_irq_init(CPUXtensaState *env);
-void *xtensa_get_extint(CPUXtensaState *env, unsigned extint);
 void xtensa_timer_irq(CPUXtensaState *env, uint32_t id, uint32_t active);
 int cpu_xtensa_signal_handler(int host_signum, void *pinfo, void *puc);
 void xtensa_cpu_list(FILE *f, fprintf_function cpu_fprintf);
@@ -503,6 +521,12 @@ static inline void xtensa_select_static_vectors(CPUXtensaState *env,
     env->static_vectors = n;
 }
 void xtensa_runstall(CPUXtensaState *env, bool runstall);
+
+static inline void *xtensa_get_extint(XtensaIRQController *irqc,
+				      unsigned extint)
+{
+    return irqc->get_irq(irqc->opaque, extint);
+}
 
 #define XTENSA_OPTION_BIT(opt) (((uint64_t)1) << (opt))
 #define XTENSA_OPTION_ALL (~(uint64_t)0)
