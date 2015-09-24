@@ -221,7 +221,35 @@ static void lx_init(const LxBoardDesc *board, MachineState *machine)
     const char *kernel_cmdline = qemu_opt_get(machine_opts, "append");
     const char *dtb_filename = qemu_opt_get(machine_opts, "dtb");
     const char *initrd_filename = qemu_opt_get(machine_opts, "initrd");
+    const unsigned system_io_size = 224 * 1024 * 1024;
     int n;
+
+    enum {
+        XTENSA_NO_MMU,
+        XTENSA_MMU,
+    } mmu;
+
+    static const struct {
+        hwaddr ram;
+        hwaddr rom;
+        hwaddr io[2];
+    } base[2] = {
+        [XTENSA_NO_MMU] = {
+            .ram = 0x60000000,
+            .rom = 0x50000000,
+            .io = {
+                0x90000000,
+                0x70000000,
+            },
+        },
+        [XTENSA_MMU] = {
+            .ram = 0,
+            .rom = 0xfe000000,
+            .io = {
+                0xf0000000,
+            },
+        },
+    };
 
     if (!cpu_model) {
         cpu_model = XTENSA_DEFAULT_CPU_MODEL;
@@ -244,16 +272,25 @@ static void lx_init(const LxBoardDesc *board, MachineState *machine)
         cpu_reset(CPU(cpu));
     }
 
+    mmu = xtensa_option_enabled(env->config, XTENSA_OPTION_MMU) ?
+        XTENSA_MMU : XTENSA_NO_MMU;
     ram = g_malloc(sizeof(*ram));
     memory_region_init_ram(ram, NULL, "lx60.dram", machine->ram_size,
                            &error_fatal);
     vmstate_register_ram_global(ram);
-    memory_region_add_subregion(system_memory, 0, ram);
+    memory_region_add_subregion(system_memory, base[mmu].ram, ram);
 
     system_io = g_malloc(sizeof(*system_io));
     memory_region_init_io(system_io, NULL, &lx60_io_ops, NULL, "lx60.io",
-                          224 * 1024 * 1024);
-    memory_region_add_subregion(system_memory, 0xf0000000, system_io);
+                          system_io_size);
+    memory_region_add_subregion(system_memory, base[mmu].io[0], system_io);
+    if (base[mmu].io[1]) {
+        MemoryRegion *io = g_malloc(sizeof(*io));
+
+        memory_region_init_alias(io, NULL, "lx60.io.cached",
+                                 system_io, 0, system_io_size);
+        memory_region_add_subregion(system_memory, base[mmu].io[1], io);
+    }
     lx60_fpga_init(system_io, 0x0d020000);
     if (nd_table[0].used) {
         lx60_net_init(system_io, 0x0d030000, 0x0d030400, 0x0d800000,
@@ -276,22 +313,25 @@ static void lx_init(const LxBoardDesc *board, MachineState *machine)
     if (kernel_filename) {
         uint32_t entry_point = env->pc;
         size_t bp_size = 3 * get_tag_size(0); /* first/last and memory tags */
-        uint32_t tagptr = 0xfe000000 + board->sram_size;
+        uint32_t tagptr = base[mmu].rom + board->sram_size;
         uint32_t cur_tagptr;
         BpMemInfo memory_location = {
             .type = tswap32(MEMORY_TYPE_CONVENTIONAL),
-            .start = tswap32(0),
-            .end = tswap32(machine->ram_size),
+            .start = tswap32(base[mmu].ram),
+            .end = tswap32(base[mmu].ram + machine->ram_size),
         };
         uint32_t lowmem_end = machine->ram_size < 0x08000000 ?
             machine->ram_size : 0x08000000;
         uint32_t cur_lowmem = QEMU_ALIGN_UP(lowmem_end / 2, 4096);
 
+        lowmem_end += base[mmu].ram;
+        cur_lowmem += base[mmu].ram;
+
         rom = g_malloc(sizeof(*rom));
         memory_region_init_ram(rom, NULL, "lx60.sram", board->sram_size,
                                &error_fatal);
         vmstate_register_ram_global(rom);
-        memory_region_add_subregion(system_memory, 0xfe000000, rom);
+        memory_region_add_subregion(system_memory, base[mmu].rom, rom);
 
         if (kernel_cmdline) {
             bp_size += get_tag_size(strlen(kernel_cmdline) + 1);
@@ -390,7 +430,7 @@ static void lx_init(const LxBoardDesc *board, MachineState *machine)
                     flash_mr, board->flash_boot_base,
                     board->flash_size - board->flash_boot_base < 0x02000000 ?
                     board->flash_size - board->flash_boot_base : 0x02000000);
-            memory_region_add_subregion(system_memory, 0xfe000000,
+            memory_region_add_subregion(system_memory, base[mmu].rom,
                     flash_io);
         }
     }
