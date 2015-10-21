@@ -83,7 +83,7 @@ this code that are retained.
 /* Define for architectures which deviate from IEEE in not supporting
  * signaling NaNs (so all NaNs are treated as quiet).
  */
-#define NO_SIGNALING_NANS 1
+//#define NO_SIGNALING_NANS 1
 #endif
 
 /*----------------------------------------------------------------------------
@@ -476,7 +476,7 @@ static int pickNaN(flag aIsQNaN, flag aIsSNaN, flag bIsQNaN, flag bIsSNaN,
         return 1;
     }
 }
-#elif defined(TARGET_PPC) || defined(TARGET_XTENSA)
+#elif defined(TARGET_PPC)
 static int pickNaN(flag aIsQNaN, flag aIsSNaN, flag bIsQNaN, flag bIsSNaN,
                    flag aIsLargerSignificand)
 {
@@ -489,6 +489,21 @@ static int pickNaN(flag aIsQNaN, flag aIsSNaN, flag bIsQNaN, flag bIsSNaN,
         return 0;
     } else {
         return 1;
+    }
+}
+#elif defined(TARGET_XTENSA)
+static int pickNaN(flag aIsQNaN, flag aIsSNaN, flag bIsQNaN, flag bIsSNaN,
+                    flag aIsLargerSignificand)
+{
+    /* Xtensa propagation rules:
+     *  1. B if it sNaN or qNaN
+     *  2. A if it sNaN or qNaN
+     * A signaling NaN is always silenced before returning it.
+     */
+    if (bIsSNaN || bIsQNaN) {
+        return 1;
+    } else {
+        return 0;
     }
 }
 #else
