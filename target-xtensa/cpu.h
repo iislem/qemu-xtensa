@@ -103,6 +103,7 @@ enum {
     XTENSA_OPTION_PROCESSOR_ID,
     XTENSA_OPTION_DEBUG,
     XTENSA_OPTION_TRACE_PORT,
+    XTENSA_OPTION_EXTERN_REGS,
 };
 
 enum {
@@ -209,7 +210,8 @@ enum {
 
 enum {
     /* Static vectors */
-    EXC_RESET,
+    EXC_RESET0,
+    EXC_RESET1,
     EXC_MEMORY_ERROR,
 
     /* Dynamic vectors */
@@ -337,6 +339,20 @@ typedef struct XtensaConfigList {
     struct XtensaConfigList *next;
 } XtensaConfigList;
 
+typedef struct XtensaExtRegRange {
+    uint32_t base;
+    uint32_t sz;
+    uint32_t offset;
+    void *opaque;
+    uint32_t (*read)(void *opaque, uint32_t offset);
+    void (*write)(void *opaque, uint32_t offset, uint32_t v);
+} XtensaExtRegRange;
+
+typedef struct XtensaExtRegMap {
+    XtensaExtRegRange *map;
+    unsigned sz;
+} XtensaExtRegMap;
+
 #ifdef HOST_WORDS_BIGENDIAN
 enum {
     FP_F32_HIGH,
@@ -366,6 +382,8 @@ typedef struct CPUXtensaState {
     xtensa_tlb_entry dtlb[10][MAX_TLB_WAY_SIZE];
     unsigned autorefill_idx;
 
+    XtensaExtRegMap extregs;
+
     int pending_irq_level; /* level of last raised IRQ */
     void **irq_inputs;
     QEMUTimer *ccompare_timer;
@@ -373,6 +391,7 @@ typedef struct CPUXtensaState {
     int64_t halt_clock;
 
     int exception_taken;
+    unsigned static_vectors;
 
     /* Watchpoints for DBREAK registers */
     struct CPUWatchpoint *cpu_watchpoint[MAX_NDBREAK];
@@ -427,7 +446,14 @@ int xtensa_get_physical_addr(CPUXtensaState *env, bool update_tlb,
 void reset_mmu(CPUXtensaState *env);
 void dump_mmu(FILE *f, fprintf_function cpu_fprintf, CPUXtensaState *env);
 void debug_exception_env(CPUXtensaState *new_env, uint32_t cause);
+void xtensa_add_ext_reg(CPUXtensaState *env, const XtensaExtRegRange *reg);
 
+static inline void xtensa_select_static_vectors(CPUXtensaState *env,
+        unsigned n)
+{
+    assert(n < 2);
+    env->static_vectors = n;
+}
 
 #define XTENSA_OPTION_BIT(opt) (((uint64_t)1) << (opt))
 #define XTENSA_OPTION_ALL (~(uint64_t)0)

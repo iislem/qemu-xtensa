@@ -1344,11 +1344,19 @@ static void disas_xtensa_insn(CPUXtensaState *env, DisasContext *dc)
                     break;
 
                 case 6: /*RER*/
-                    TBD();
+                    HAS_OPTION(XTENSA_OPTION_EXTERN_REGS);
+                    if (gen_check_privilege(dc) &&
+                        gen_window_check2(dc, RRR_S, RRR_T)) {
+                        gen_helper_rer(cpu_R[RRR_T], cpu_env, cpu_R[RRR_S]);
+                    }
                     break;
 
                 case 7: /*WER*/
-                    TBD();
+                    HAS_OPTION(XTENSA_OPTION_EXTERN_REGS);
+                    if (gen_check_privilege(dc) &&
+                        gen_window_check2(dc, RRR_S, RRR_T)) {
+                        gen_helper_wer(cpu_env, cpu_R[RRR_T], cpu_R[RRR_S]);
+                    }
                     break;
 
                 case 8: /*ROTWw*/
@@ -2221,6 +2229,10 @@ static void disas_xtensa_insn(CPUXtensaState *env, DisasContext *dc)
                 RESERVED();
                 break;
             }
+            break;
+
+        case 14: /*GPIO32*/
+            gen_check_cpenable(dc, 7);
             break;
 
         default: /*reserved*/
