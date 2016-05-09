@@ -31,6 +31,7 @@
 #include "qapi/qmp/qstring.h"
 #include "qom/object_interfaces.h"
 #include "io/channel-socket.h"
+#include "crypto/init.h"
 
 #include <getopt.h>
 #include <libgen.h>
@@ -214,7 +215,7 @@ static int find_partition(BlockBackend *blk, int partition,
 
 static void termsig_handler(int signum)
 {
-    state = TERMINATE;
+    atomic_cmpxchg(&state, RUNNING, TERMINATE);
     qemu_notify_event();
 }
 
@@ -519,6 +520,12 @@ int main(int argc, char **argv)
     memset(&sa_sigterm, 0, sizeof(sa_sigterm));
     sa_sigterm.sa_handler = termsig_handler;
     sigaction(SIGTERM, &sa_sigterm, NULL);
+
+    if (qcrypto_init(&local_err) < 0) {
+        error_reportf_err(local_err, "cannot initialize crypto: ");
+        exit(1);
+    }
+
     module_call_init(MODULE_INIT_QOM);
     qemu_add_opts(&qemu_object_opts);
     qemu_init_exec_dir(argv[0]);
@@ -704,8 +711,7 @@ int main(int argc, char **argv)
 
     if (qemu_opts_foreach(&qemu_object_opts,
                           user_creatable_add_opts_foreach,
-                          NULL, &local_err)) {
-        error_report_err(local_err);
+                          NULL, NULL)) {
         exit(EXIT_FAILURE);
     }
 

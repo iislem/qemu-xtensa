@@ -16,6 +16,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+import errno
 import os
 import re
 import subprocess
@@ -27,11 +28,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', '
 import qmp
 import qtest
 import struct
+import json
 
-__all__ = ['imgfmt', 'imgproto', 'test_dir' 'qemu_img', 'qemu_io',
-           'VM', 'QMPTestCase', 'notrun', 'main', 'verify_image_format',
-           'verify_platform', 'filter_test_dir', 'filter_win32',
-           'filter_qemu_io', 'filter_chown', 'log']
 
 # This will not work if arguments contain spaces but is necessary if we
 # want to support the override options that ./check supports.
@@ -105,6 +103,11 @@ def create_image(name, size):
         file.write(sector)
         i = i + 512
     file.close()
+
+def image_size(img):
+    '''Return image's virtual size'''
+    r = qemu_img_pipe('info', '--output=json', '-f', imgfmt, img)
+    return json.loads(r)['virtual-size']
 
 test_dir_re = re.compile(r"%s" % test_dir)
 def filter_test_dir(msg):
@@ -247,7 +250,8 @@ class VM(object):
             self._qmp.accept()
             self._qtest.accept()
         except:
-            os.remove(self._monitor_path)
+            _remove_if_exists(self._monitor_path)
+            _remove_if_exists(self._qtest_path)
             raise
 
     def shutdown(self):
@@ -350,6 +354,20 @@ class QMPTestCase(unittest.TestCase):
         result = self.vm.qmp('query-block-jobs')
         self.assert_qmp(result, 'return', [])
 
+    def assert_has_block_node(self, node_name=None, file_name=None):
+        """Issue a query-named-block-nodes and assert node_name and/or
+        file_name is present in the result"""
+        def check_equal_or_none(a, b):
+            return a == None or b == None or a == b
+        assert node_name or file_name
+        result = self.vm.qmp('query-named-block-nodes')
+        for x in result["return"]:
+            if check_equal_or_none(x.get("node-name"), node_name) and \
+                    check_equal_or_none(x.get("file"), file_name):
+                return
+        self.assertTrue(False, "Cannot find %s %s in result:\n%s" % \
+                (node_name, file_name, result))
+
     def cancel_and_wait(self, drive='drive0', force=False, resume=False):
         '''Cancel a block job and wait for it to finish, returning the event'''
         result = self.vm.qmp('block-job-cancel', device=drive, force=force)
@@ -409,6 +427,15 @@ class QMPTestCase(unittest.TestCase):
         event = self.wait_until_completed(drive=drive)
         self.assert_qmp(event, 'data/type', 'mirror')
 
+def _remove_if_exists(path):
+    '''Remove file object at path if it exists'''
+    try:
+        os.remove(path)
+    except OSError as exception:
+        if exception.errno == errno.ENOENT:
+           return
+        raise
+
 def notrun(reason):
     '''Skip this test suite'''
     # Each test in qemu-iotests has a number ("seq")
@@ -425,6 +452,11 @@ def verify_image_format(supported_fmts=[]):
 def verify_platform(supported_oses=['linux']):
     if True not in [sys.platform.startswith(x) for x in supported_oses]:
         notrun('not suitable for this OS: %s' % sys.platform)
+
+def verify_quorum():
+    '''Skip test suite if quorum support is not available'''
+    if 'quorum' not in qemu_img_pipe('--help'):
+        notrun('quorum support missing')
 
 def main(supported_fmts=[], supported_oses=['linux']):
     '''Run tests'''

@@ -37,6 +37,7 @@
 #include "block/block_int.h"
 #include "block/blockjob.h"
 #include "block/qapi.h"
+#include "crypto/init.h"
 #include <getopt.h>
 
 #define QEMU_IMG_VERSION "qemu-img version " QEMU_VERSION QEMU_PKGVERSION \
@@ -256,7 +257,7 @@ static BlockBackend *img_open_opts(const char *optstr,
     options = qemu_opts_to_qdict(opts, NULL);
     blk = blk_new_open(NULL, NULL, options, flags, &local_err);
     if (!blk) {
-        error_reportf_err(local_err, "Could not open '%s'", optstr);
+        error_reportf_err(local_err, "Could not open '%s': ", optstr);
         return NULL;
     }
     blk_set_enable_write_cache(blk, !writethrough);
@@ -434,8 +435,7 @@ static int img_create(int argc, char **argv)
 
     if (qemu_opts_foreach(&qemu_object_opts,
                           user_creatable_add_opts_foreach,
-                          NULL, &local_err)) {
-        error_report_err(local_err);
+                          NULL, NULL)) {
         goto fail;
     }
 
@@ -597,7 +597,6 @@ static int img_check(int argc, char **argv)
     bool writethrough;
     ImageCheck *check;
     bool quiet = false;
-    Error *local_err = NULL;
     bool image_opts = false;
 
     fmt = NULL;
@@ -678,8 +677,7 @@ static int img_check(int argc, char **argv)
 
     if (qemu_opts_foreach(&qemu_object_opts,
                           user_creatable_add_opts_foreach,
-                          NULL, &local_err)) {
-        error_report_err(local_err);
+                          NULL, NULL)) {
         return 1;
     }
 
@@ -870,8 +868,7 @@ static int img_commit(int argc, char **argv)
 
     if (qemu_opts_foreach(&qemu_object_opts,
                           user_creatable_add_opts_foreach,
-                          NULL, &local_err)) {
-        error_report_err(local_err);
+                          NULL, NULL)) {
         return 1;
     }
 
@@ -1132,7 +1129,6 @@ static int img_compare(int argc, char **argv)
     int64_t nb_sectors;
     int c, pnum;
     uint64_t progress_base;
-    Error *local_err = NULL;
     bool image_opts = false;
 
     cache = BDRV_DEFAULT_CACHE;
@@ -1200,8 +1196,7 @@ static int img_compare(int argc, char **argv)
 
     if (qemu_opts_foreach(&qemu_object_opts,
                           user_creatable_add_opts_foreach,
-                          NULL, &local_err)) {
-        error_report_err(local_err);
+                          NULL, NULL)) {
         ret = 2;
         goto out4;
     }
@@ -1863,8 +1858,7 @@ static int img_convert(int argc, char **argv)
 
     if (qemu_opts_foreach(&qemu_object_opts,
                           user_creatable_add_opts_foreach,
-                          NULL, &local_err)) {
-        error_report_err(local_err);
+                          NULL, NULL)) {
         goto fail_getopt;
     }
 
@@ -2298,7 +2292,6 @@ static int img_info(int argc, char **argv)
     bool chain = false;
     const char *filename, *fmt, *output;
     ImageInfoList *list;
-    Error *local_err = NULL;
     bool image_opts = false;
 
     fmt = NULL;
@@ -2362,8 +2355,7 @@ static int img_info(int argc, char **argv)
 
     if (qemu_opts_foreach(&qemu_object_opts,
                           user_creatable_add_opts_foreach,
-                          NULL, &local_err)) {
-        error_report_err(local_err);
+                          NULL, NULL)) {
         return 1;
     }
 
@@ -2512,7 +2504,6 @@ static int img_map(int argc, char **argv)
     int64_t length;
     MapEntry curr = { .length = 0 }, next;
     int ret = 0;
-    Error *local_err = NULL;
     bool image_opts = false;
 
     fmt = NULL;
@@ -2572,8 +2563,7 @@ static int img_map(int argc, char **argv)
 
     if (qemu_opts_foreach(&qemu_object_opts,
                           user_creatable_add_opts_foreach,
-                          NULL, &local_err)) {
-        error_report_err(local_err);
+                          NULL, NULL)) {
         return 1;
     }
 
@@ -2716,8 +2706,7 @@ static int img_snapshot(int argc, char **argv)
 
     if (qemu_opts_foreach(&qemu_object_opts,
                           user_creatable_add_opts_foreach,
-                          NULL, &err)) {
-        error_report_err(err);
+                          NULL, NULL)) {
         return 1;
     }
 
@@ -2866,8 +2855,7 @@ static int img_rebase(int argc, char **argv)
 
     if (qemu_opts_foreach(&qemu_object_opts,
                           user_creatable_add_opts_foreach,
-                          NULL, &local_err)) {
-        error_report_err(local_err);
+                          NULL, NULL)) {
         return 1;
     }
 
@@ -3132,7 +3120,6 @@ static int img_resize(int argc, char **argv)
     bool quiet = false;
     BlockBackend *blk = NULL;
     QemuOpts *param;
-    Error *local_err = NULL;
 
     static QemuOptsList resize_options = {
         .name = "resize_options",
@@ -3203,8 +3190,7 @@ static int img_resize(int argc, char **argv)
 
     if (qemu_opts_foreach(&qemu_object_opts,
                           user_creatable_add_opts_foreach,
-                          NULL, &local_err)) {
-        error_report_err(local_err);
+                          NULL, NULL)) {
         return 1;
     }
 
@@ -3296,7 +3282,6 @@ static int img_amend(int argc, char **argv)
     bool quiet = false, progress = false;
     BlockBackend *blk = NULL;
     BlockDriverState *bs = NULL;
-    Error *local_err = NULL;
     bool image_opts = false;
 
     cache = BDRV_DEFAULT_CACHE;
@@ -3364,8 +3349,7 @@ static int img_amend(int argc, char **argv)
 
     if (qemu_opts_foreach(&qemu_object_opts,
                           user_creatable_add_opts_foreach,
-                          NULL, &local_err)) {
-        error_report_err(local_err);
+                          NULL, NULL)) {
         ret = -1;
         goto out_no_progress;
     }
@@ -3484,6 +3468,11 @@ int main(int argc, char **argv)
     if (qemu_init_main_loop(&local_error)) {
         error_report_err(local_error);
         exit(EXIT_FAILURE);
+    }
+
+    if (qcrypto_init(&local_error) < 0) {
+        error_reportf_err(local_error, "cannot initialize crypto: ");
+        exit(1);
     }
 
     module_call_init(MODULE_INIT_QOM);

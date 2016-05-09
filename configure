@@ -298,6 +298,7 @@ coroutine=""
 coroutine_pool=""
 seccomp=""
 glusterfs=""
+glusterfs_xlator_opt="no"
 glusterfs_discard="no"
 glusterfs_zerofill="no"
 archipelago="no"
@@ -1872,6 +1873,9 @@ if test "$seccomp" != "no" ; then
     i386|x86_64)
         libseccomp_minver="2.1.0"
         ;;
+    mips)
+        libseccomp_minver="2.2.0"
+        ;;
     arm|aarch64)
         libseccomp_minver="2.2.3"
         ;;
@@ -3397,6 +3401,9 @@ if test "$glusterfs" != "no" ; then
     glusterfs="yes"
     glusterfs_cflags=`$pkg_config --cflags glusterfs-api`
     glusterfs_libs=`$pkg_config --libs glusterfs-api`
+    if $pkg_config --atleast-version=4 glusterfs-api; then
+      glusterfs_xlator_opt="yes"
+    fi
     if $pkg_config --atleast-version=5 glusterfs-api; then
       glusterfs_discard="yes"
     fi
@@ -4487,6 +4494,21 @@ if test "$fortify_source" != "no"; then
 fi
 
 ##########################################
+# check if struct fsxattr is available via linux/fs.h
+
+have_fsxattr=no
+cat > $TMPC << EOF
+#include <linux/fs.h>
+struct fsxattr foo;
+int main(void) {
+  return 0;
+}
+EOF
+if compile_prog "" "" ; then
+    have_fsxattr=yes
+fi
+
+##########################################
 # End of CC checks
 # After here, no more $cc or $ld runs
 
@@ -5153,6 +5175,14 @@ fi
 if test "$have_ifaddrs_h" = "yes" ; then
     echo "HAVE_IFADDRS_H=y" >> $config_host_mak
 fi
+
+# Work around a system header bug with some kernel/XFS header
+# versions where they both try to define 'struct fsxattr':
+# xfs headers will not try to redefine structs from linux headers
+# if this macro is set.
+if test "$have_fsxattr" = "yes" ; then
+    echo "HAVE_FSXATTR=y" >> $config_host_mak
+fi
 if test "$vte" = "yes" ; then
   echo "CONFIG_VTE=y" >> $config_host_mak
   echo "VTE_CFLAGS=$vte_cflags" >> $config_host_mak
@@ -5337,6 +5367,10 @@ if test "$glusterfs" = "yes" ; then
   echo "CONFIG_GLUSTERFS=m" >> $config_host_mak
   echo "GLUSTERFS_CFLAGS=$glusterfs_cflags" >> $config_host_mak
   echo "GLUSTERFS_LIBS=$glusterfs_libs" >> $config_host_mak
+fi
+
+if test "$glusterfs_xlator_opt" = "yes" ; then
+  echo "CONFIG_GLUSTERFS_XLATOR_OPT=y" >> $config_host_mak
 fi
 
 if test "$glusterfs_discard" = "yes" ; then
