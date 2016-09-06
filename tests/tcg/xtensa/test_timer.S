@@ -1,12 +1,22 @@
 #include "macros.inc"
 
+#define CCOUNT_SHIFT 4
+#define WAIT_LOOPS 0x100000
+
+.macro      make_ccount_delta target, delta
+    rsr     \delta, ccount
+    rsr     \target, ccount
+    sub     \delta, \target, \delta
+    slli    \delta, \delta, CCOUNT_SHIFT
+    add     \target, \target, \delta
+.endm
+
 test_suite timer
 
 test ccount
     rsr     a3, ccount
     rsr     a4, ccount
-    sub     a3, a4, a3
-    assert  eqi, a3, 1
+    assert  ne, a3, a4
 test_end
 
 test ccompare
@@ -18,9 +28,8 @@ test ccompare
     wsr     a2, ccompare1
     wsr     a2, ccompare2
 
-    movi    a3, 20
-    rsr     a2, ccount
-    addi    a2, a2, 20
+    movi    a3, WAIT_LOOPS
+    make_ccount_delta a2, a15
     wsr     a2, ccompare0
     rsr     a2, interrupt
     assert  eqi, a2, 0
@@ -42,9 +51,8 @@ test ccompare0_interrupt
     wsr     a2, ccompare1
     wsr     a2, ccompare2
 
-    movi    a3, 20
-    rsr     a2, ccount
-    addi    a2, a2, 20
+    movi    a3, WAIT_LOOPS
+    make_ccount_delta a2, a15
     wsr     a2, ccompare0
     rsync
     rsr     a2, interrupt
@@ -72,9 +80,8 @@ test ccompare1_interrupt
     wsr     a2, ccompare0
     wsr     a2, ccompare2
 
-    movi    a3, 20
-    rsr     a2, ccount
-    addi    a2, a2, 20
+    movi    a3, WAIT_LOOPS
+    make_ccount_delta a2, a15
     wsr     a2, ccompare1
     rsync
     rsr     a2, interrupt
@@ -99,9 +106,8 @@ test ccompare2_interrupt
     wsr     a2, ccompare0
     wsr     a2, ccompare1
 
-    movi    a3, 20
-    rsr     a2, ccount
-    addi    a2, a2, 20
+    movi    a3, WAIT_LOOPS
+    make_ccount_delta a2, a15
     wsr     a2, ccompare2
     rsync
     rsr     a2, interrupt
@@ -125,11 +131,10 @@ test ccompare_interrupt_masked
     movi    a2, 0
     wsr     a2, ccompare2
 
-    movi    a3, 40
-    rsr     a2, ccount
-    addi    a2, a2, 20
+    movi    a3, 2 * WAIT_LOOPS
+    make_ccount_delta a2, a15
     wsr     a2, ccompare1
-    addi    a2, a2, 20
+    add     a2, a2, a15
     wsr     a2, ccompare0
     rsync
     rsr     a2, interrupt
@@ -156,11 +161,10 @@ test ccompare_interrupt_masked_waiti
     movi    a2, 0
     wsr     a2, ccompare2
 
-    movi    a3, 40
-    rsr     a2, ccount
-    addi    a2, a2, 20
+    movi    a3, 2 * WAIT_LOOPS
+    make_ccount_delta a2, a15
     wsr     a2, ccompare1
-    addi    a2, a2, 20
+    add     a2, a2, a15
     wsr     a2, ccompare0
     rsync
     rsr     a2, interrupt
