@@ -52,10 +52,43 @@ static void xtensa_core_class_init(ObjectClass *oc, void *data)
     cc->gdb_num_core_regs = config->gdb_regmap.num_regs;
 }
 
+static void init_libisa(XtensaConfig *config)
+{
+    unsigned i;
+    unsigned opcodes;
+
+    config->isa = xtensa_isa_init(config->isa_internal, NULL, NULL);
+    opcodes = xtensa_isa_num_opcodes(config->isa);
+    config->opcode_map = malloc(opcodes * sizeof(XtensaOpcodeMap *));
+
+    for (i = 0; i < opcodes; ++i) {
+        const char *opc_name = xtensa_opcode_name(config->isa, i);
+        XtensaOpcodeMap *map = NULL;
+
+#if 0
+        map = xtensa_find_opcode_map(config->named_translators,
+                                     opc_name);
+#endif
+
+        if (map == NULL) {
+            map = xtensa_find_opcode_map(NULL, opc_name);
+        }
+        if (map == NULL) {
+            fprintf(stderr, "map not found for %s's opcode %s\n",
+                    config->name, opc_name);
+            map = NULL;//xtensa_find_opcode_map(NULL, "ill");
+        }
+        config->opcode_map[i] = map;
+    }
+}
+
 void xtensa_finalize_config(XtensaConfig *config)
 {
     unsigned i, n = 0;
 
+    if (config->isa_internal) {
+        init_libisa(config);
+    }
     if (config->gdb_regmap.num_regs) {
         return;
     }

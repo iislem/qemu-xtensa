@@ -37,6 +37,7 @@
 #include "cpu-qom.h"
 #include "exec/cpu-defs.h"
 #include "fpu/softfloat.h"
+#include "xtensa-isa.h"
 
 #define NB_MMU_MODES 4
 
@@ -330,6 +331,21 @@ typedef struct XtensaMemory {
     } location[MAX_NMEMORY];
 } XtensaMemory;
 
+typedef struct DisasContext DisasContext;
+typedef void (*XtensaOpcodeTranslator)(DisasContext *dc, uint32_t arg[],
+                                       uint32_t par[]);
+
+typedef struct XtensaOpcodeMap {
+    const char *name;
+    XtensaOpcodeTranslator translator;
+    uint32_t *par;
+} XtensaOpcodeMap;
+
+typedef struct XtensaOpcodeTranslators {
+    unsigned num_translators;
+    const XtensaOpcodeMap *translator;
+} XtensaOpcodeTranslators;
+
 struct XtensaConfig {
     const char *name;
     uint64_t options;
@@ -369,6 +385,11 @@ struct XtensaConfig {
     XtensaMemory sysram;
 
     uint32_t configid[2];
+
+    void *isa_internal;
+    xtensa_isa isa;
+    XtensaOpcodeMap **opcode_map;
+    XtensaOpcodeTranslators translators;
 
     uint32_t clock_freq_khz;
 
@@ -520,6 +541,8 @@ static inline void xtensa_select_static_vectors(CPUXtensaState *env,
     env->static_vectors = n;
 }
 void xtensa_runstall(CPUXtensaState *env, bool runstall);
+XtensaOpcodeMap *xtensa_find_opcode_map(const XtensaOpcodeTranslators *t,
+                                        const char *opcode);
 
 #define XTENSA_OPTION_BIT(opt) (((uint64_t)1) << (opt))
 #define XTENSA_OPTION_ALL (~(uint64_t)0)

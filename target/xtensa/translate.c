@@ -71,6 +71,10 @@ typedef struct DisasContext {
     TCGv_i32 next_icount;
 
     unsigned cpenable;
+
+    uint32_t *raw_arg;
+    xtensa_insnbuf insnbuf;
+    xtensa_insnbuf slotbuf;
 } DisasContext;
 
 static TCGv_env cpu_env;
@@ -468,47 +472,22 @@ static void gen_jumpi_check_loop_end(DisasContext *dc, int slot)
 }
 
 static void gen_brcond(DisasContext *dc, TCGCond cond,
-        TCGv_i32 t0, TCGv_i32 t1, uint32_t offset)
+                       TCGv_i32 t0, TCGv_i32 t1, uint32_t addr)
 {
     TCGLabel *label = gen_new_label();
 
     tcg_gen_brcond_i32(cond, t0, t1, label);
     gen_jumpi_check_loop_end(dc, 0);
     gen_set_label(label);
-    gen_jumpi(dc, dc->pc + offset, 1);
+    gen_jumpi(dc, addr, 1);
 }
 
 static void gen_brcondi(DisasContext *dc, TCGCond cond,
-        TCGv_i32 t0, uint32_t t1, uint32_t offset)
+                        TCGv_i32 t0, uint32_t t1, uint32_t addr)
 {
     TCGv_i32 tmp = tcg_const_i32(t1);
-    gen_brcond(dc, cond, t0, tmp, offset);
+    gen_brcond(dc, cond, t0, tmp, addr);
     tcg_temp_free(tmp);
-}
-
-static bool gen_check_sr(DisasContext *dc, uint32_t sr, unsigned access)
-{
-    if (!xtensa_option_bits_enabled(dc->config, sregnames[sr].opt_bits)) {
-        if (sregnames[sr].name) {
-            qemu_log_mask(LOG_GUEST_ERROR, "SR %s is not configured\n", sregnames[sr].name);
-        } else {
-            qemu_log_mask(LOG_UNIMP, "SR %d is not implemented\n", sr);
-        }
-        gen_exception_cause(dc, ILLEGAL_INSTRUCTION_CAUSE);
-        return false;
-    } else if (!(sregnames[sr].access & access)) {
-        static const char * const access_text[] = {
-            [SR_R] = "rsr",
-            [SR_W] = "wsr",
-            [SR_X] = "xsr",
-        };
-        assert(access < ARRAY_SIZE(access_text) && access_text[access]);
-        qemu_log_mask(LOG_GUEST_ERROR, "SR %s is not available for %s\n", sregnames[sr].name,
-                      access_text[access]);
-        gen_exception_cause(dc, ILLEGAL_INSTRUCTION_CAUSE);
-        return false;
-    }
-    return true;
 }
 
 static bool gen_rsr_ccount(DisasContext *dc, TCGv_i32 d, uint32_t sr)
@@ -944,2146 +923,79 @@ static TCGv_i32 gen_mac16_m(TCGv_i32 v, bool hi, bool is_unsigned)
     return m;
 }
 
-static inline unsigned xtensa_op0_insn_len(unsigned op0)
+static inline unsigned xtensa_op0_insn_len(DisasContext *dc, uint8_t op0)
 {
-    return op0 >= 8 ? 2 : 3;
+    return xtensa_isa_length_from_chars(dc->config->isa, &op0);
 }
 
 static void disas_xtensa_insn(CPUXtensaState *env, DisasContext *dc)
 {
-#define HAS_OPTION_BITS(opt) do { \
-        if (!option_bits_enabled(dc, opt)) { \
-            qemu_log_mask(LOG_GUEST_ERROR, "Option is not enabled %s:%d\n", \
-                          __FILE__, __LINE__); \
-            goto invalid_opcode; \
-        } \
-    } while (0)
+    xtensa_isa isa = dc->config->isa;
+    unsigned char b[16] = {cpu_ldub_code(env, dc->pc)};
+    unsigned len = xtensa_op0_insn_len(dc, b[0]);
+    xtensa_format fmt;
+    unsigned slot, slots;
+    unsigned i;
 
-#define HAS_OPTION(opt) HAS_OPTION_BITS(XTENSA_OPTION_BIT(opt))
-
-#define TBD() qemu_log_mask(LOG_UNIMP, "TBD(pc = %08x): %s:%d\n", dc->pc, __FILE__, __LINE__)
-#define RESERVED() do { \
-        qemu_log_mask(LOG_GUEST_ERROR, "RESERVED(pc = %08x, %02x%02x%02x): %s:%d\n", \
-                      dc->pc, b0, b1, b2, __FILE__, __LINE__); \
-        goto invalid_opcode; \
-    } while (0)
-
-
-#ifdef TARGET_WORDS_BIGENDIAN
-#define OP0 (((b0) & 0xf0) >> 4)
-#define OP1 (((b2) & 0xf0) >> 4)
-#define OP2 ((b2) & 0xf)
-#define RRR_R ((b1) & 0xf)
-#define RRR_S (((b1) & 0xf0) >> 4)
-#define RRR_T ((b0) & 0xf)
-#else
-#define OP0 (((b0) & 0xf))
-#define OP1 (((b2) & 0xf))
-#define OP2 (((b2) & 0xf0) >> 4)
-#define RRR_R (((b1) & 0xf0) >> 4)
-#define RRR_S (((b1) & 0xf))
-#define RRR_T (((b0) & 0xf0) >> 4)
-#endif
-#define RRR_X ((RRR_R & 0x4) >> 2)
-#define RRR_Y ((RRR_T & 0x4) >> 2)
-#define RRR_W (RRR_R & 0x3)
-
-#define RRRN_R RRR_R
-#define RRRN_S RRR_S
-#define RRRN_T RRR_T
-
-#define RRI4_R RRR_R
-#define RRI4_S RRR_S
-#define RRI4_T RRR_T
-#ifdef TARGET_WORDS_BIGENDIAN
-#define RRI4_IMM4 ((b2) & 0xf)
-#else
-#define RRI4_IMM4 (((b2) & 0xf0) >> 4)
-#endif
-
-#define RRI8_R RRR_R
-#define RRI8_S RRR_S
-#define RRI8_T RRR_T
-#define RRI8_IMM8 (b2)
-#define RRI8_IMM8_SE ((((b2) & 0x80) ? 0xffffff00 : 0) | RRI8_IMM8)
-
-#ifdef TARGET_WORDS_BIGENDIAN
-#define RI16_IMM16 (((b1) << 8) | (b2))
-#else
-#define RI16_IMM16 (((b2) << 8) | (b1))
-#endif
-
-#ifdef TARGET_WORDS_BIGENDIAN
-#define CALL_N (((b0) & 0xc) >> 2)
-#define CALL_OFFSET ((((b0) & 0x3) << 16) | ((b1) << 8) | (b2))
-#else
-#define CALL_N (((b0) & 0x30) >> 4)
-#define CALL_OFFSET ((((b0) & 0xc0) >> 6) | ((b1) << 2) | ((b2) << 10))
-#endif
-#define CALL_OFFSET_SE \
-    (((CALL_OFFSET & 0x20000) ? 0xfffc0000 : 0) | CALL_OFFSET)
-
-#define CALLX_N CALL_N
-#ifdef TARGET_WORDS_BIGENDIAN
-#define CALLX_M ((b0) & 0x3)
-#else
-#define CALLX_M (((b0) & 0xc0) >> 6)
-#endif
-#define CALLX_S RRR_S
-
-#define BRI12_M CALLX_M
-#define BRI12_S RRR_S
-#ifdef TARGET_WORDS_BIGENDIAN
-#define BRI12_IMM12 ((((b1) & 0xf) << 8) | (b2))
-#else
-#define BRI12_IMM12 ((((b1) & 0xf0) >> 4) | ((b2) << 4))
-#endif
-#define BRI12_IMM12_SE (((BRI12_IMM12 & 0x800) ? 0xfffff000 : 0) | BRI12_IMM12)
-
-#define BRI8_M BRI12_M
-#define BRI8_R RRI8_R
-#define BRI8_S RRI8_S
-#define BRI8_IMM8 RRI8_IMM8
-#define BRI8_IMM8_SE RRI8_IMM8_SE
-
-#define RSR_SR (b1)
-
-    uint8_t b0 = cpu_ldub_code(env, dc->pc);
-    uint8_t b1 = cpu_ldub_code(env, dc->pc + 1);
-    uint8_t b2 = 0;
-    unsigned len = xtensa_op0_insn_len(OP0);
-
-    static const uint32_t B4CONST[] = {
-        0xffffffff, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16, 32, 64, 128, 256
-    };
-
-    static const uint32_t B4CONSTU[] = {
-        32768, 65536, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16, 32, 64, 128, 256
-    };
-
-    switch (len) {
-    case 2:
-        HAS_OPTION(XTENSA_OPTION_CODE_DENSITY);
-        break;
-
-    case 3:
-        b2 = cpu_ldub_code(env, dc->pc + 2);
-        break;
-
-    default:
-        RESERVED();
+    if (len == XTENSA_UNDEFINED) {
+        goto invalid_opcode;
     }
+
     dc->next_pc = dc->pc + len;
-
-    switch (OP0) {
-    case 0: /*QRST*/
-        switch (OP1) {
-        case 0: /*RST0*/
-            switch (OP2) {
-            case 0: /*ST0*/
-                if ((RRR_R & 0xc) == 0x8) {
-                    HAS_OPTION(XTENSA_OPTION_BOOLEAN);
-                }
-
-                switch (RRR_R) {
-                case 0: /*SNM0*/
-                    switch (CALLX_M) {
-                    case 0: /*ILL*/
-                        gen_exception_cause(dc, ILLEGAL_INSTRUCTION_CAUSE);
-                        break;
-
-                    case 1: /*reserved*/
-                        RESERVED();
-                        break;
-
-                    case 2: /*JR*/
-                        switch (CALLX_N) {
-                        case 0: /*RET*/
-                        case 2: /*JX*/
-                            if (gen_window_check1(dc, CALLX_S)) {
-                                gen_jump(dc, cpu_R[CALLX_S]);
-                            }
-                            break;
-
-                        case 1: /*RETWw*/
-                            HAS_OPTION(XTENSA_OPTION_WINDOWED_REGISTER);
-                            {
-                                TCGv_i32 tmp = tcg_const_i32(dc->pc);
-                                gen_helper_retw(tmp, cpu_env, tmp);
-                                gen_jump(dc, tmp);
-                                tcg_temp_free(tmp);
-                            }
-                            break;
-
-                        case 3: /*reserved*/
-                            RESERVED();
-                            break;
-                        }
-                        break;
-
-                    case 3: /*CALLX*/
-                        if (!gen_window_check2(dc, CALLX_S, CALLX_N << 2)) {
-                            break;
-                        }
-                        switch (CALLX_N) {
-                        case 0: /*CALLX0*/
-                            {
-                                TCGv_i32 tmp = tcg_temp_new_i32();
-                                tcg_gen_mov_i32(tmp, cpu_R[CALLX_S]);
-                                tcg_gen_movi_i32(cpu_R[0], dc->next_pc);
-                                gen_jump(dc, tmp);
-                                tcg_temp_free(tmp);
-                            }
-                            break;
-
-                        case 1: /*CALLX4w*/
-                        case 2: /*CALLX8w*/
-                        case 3: /*CALLX12w*/
-                            HAS_OPTION(XTENSA_OPTION_WINDOWED_REGISTER);
-                            {
-                                TCGv_i32 tmp = tcg_temp_new_i32();
-
-                                tcg_gen_mov_i32(tmp, cpu_R[CALLX_S]);
-                                gen_callw(dc, CALLX_N, tmp);
-                                tcg_temp_free(tmp);
-                            }
-                            break;
-                        }
-                        break;
-                    }
-                    break;
-
-                case 1: /*MOVSPw*/
-                    HAS_OPTION(XTENSA_OPTION_WINDOWED_REGISTER);
-                    if (gen_window_check2(dc, RRR_T, RRR_S)) {
-                        TCGv_i32 pc = tcg_const_i32(dc->pc);
-                        gen_helper_movsp(cpu_env, pc);
-                        tcg_gen_mov_i32(cpu_R[RRR_T], cpu_R[RRR_S]);
-                        tcg_temp_free(pc);
-                    }
-                    break;
-
-                case 2: /*SYNC*/
-                    switch (RRR_T) {
-                    case 0: /*ISYNC*/
-                        break;
-
-                    case 1: /*RSYNC*/
-                        break;
-
-                    case 2: /*ESYNC*/
-                        break;
-
-                    case 3: /*DSYNC*/
-                        break;
-
-                    case 8: /*EXCW*/
-                        HAS_OPTION(XTENSA_OPTION_EXCEPTION);
-                        break;
-
-                    case 12: /*MEMW*/
-                        break;
-
-                    case 13: /*EXTW*/
-                        break;
-
-                    case 15: /*NOP*/
-                        break;
-
-                    default: /*reserved*/
-                        RESERVED();
-                        break;
-                    }
-                    break;
-
-                case 3: /*RFEIx*/
-                    switch (RRR_T) {
-                    case 0: /*RFETx*/
-                        HAS_OPTION(XTENSA_OPTION_EXCEPTION);
-                        switch (RRR_S) {
-                        case 0: /*RFEx*/
-                            if (gen_check_privilege(dc)) {
-                                tcg_gen_andi_i32(cpu_SR[PS], cpu_SR[PS], ~PS_EXCM);
-                                gen_check_interrupts(dc);
-                                gen_jump(dc, cpu_SR[EPC1]);
-                            }
-                            break;
-
-                        case 1: /*RFUEx*/
-                            RESERVED();
-                            break;
-
-                        case 2: /*RFDEx*/
-                            if (gen_check_privilege(dc)) {
-                                gen_jump(dc, cpu_SR[
-                                         dc->config->ndepc ? DEPC : EPC1]);
-                            }
-                            break;
-
-                        case 4: /*RFWOw*/
-                        case 5: /*RFWUw*/
-                            HAS_OPTION(XTENSA_OPTION_WINDOWED_REGISTER);
-                            if (gen_check_privilege(dc)) {
-                                TCGv_i32 tmp = tcg_const_i32(1);
-
-                                tcg_gen_andi_i32(
-                                        cpu_SR[PS], cpu_SR[PS], ~PS_EXCM);
-                                tcg_gen_shl_i32(tmp, tmp, cpu_SR[WINDOW_BASE]);
-
-                                if (RRR_S == 4) {
-                                    tcg_gen_andc_i32(cpu_SR[WINDOW_START],
-                                            cpu_SR[WINDOW_START], tmp);
-                                } else {
-                                    tcg_gen_or_i32(cpu_SR[WINDOW_START],
-                                            cpu_SR[WINDOW_START], tmp);
-                                }
-
-                                gen_helper_restore_owb(cpu_env);
-                                gen_check_interrupts(dc);
-                                gen_jump(dc, cpu_SR[EPC1]);
-
-                                tcg_temp_free(tmp);
-                            }
-                            break;
-
-                        default: /*reserved*/
-                            RESERVED();
-                            break;
-                        }
-                        break;
-
-                    case 1: /*RFIx*/
-                        HAS_OPTION(XTENSA_OPTION_HIGH_PRIORITY_INTERRUPT);
-                        if (RRR_S >= 2 && RRR_S <= dc->config->nlevel) {
-                            if (gen_check_privilege(dc)) {
-                                tcg_gen_mov_i32(cpu_SR[PS],
-                                                cpu_SR[EPS2 + RRR_S - 2]);
-                                gen_check_interrupts(dc);
-                                gen_jump(dc, cpu_SR[EPC1 + RRR_S - 1]);
-                            }
-                        } else {
-                            qemu_log_mask(LOG_GUEST_ERROR, "RFI %d is illegal\n", RRR_S);
-                            gen_exception_cause(dc, ILLEGAL_INSTRUCTION_CAUSE);
-                        }
-                        break;
-
-                    case 2: /*RFME*/
-                        TBD();
-                        break;
-
-                    default: /*reserved*/
-                        RESERVED();
-                        break;
-
-                    }
-                    break;
-
-                case 4: /*BREAKx*/
-                    HAS_OPTION(XTENSA_OPTION_DEBUG);
-                    if (dc->debug) {
-                        gen_debug_exception(dc, DEBUGCAUSE_BI);
-                    }
-                    break;
-
-                case 5: /*SYSCALLx*/
-                    HAS_OPTION(XTENSA_OPTION_EXCEPTION);
-                    switch (RRR_S) {
-                    case 0: /*SYSCALLx*/
-                        gen_exception_cause(dc, SYSCALL_CAUSE);
-                        break;
-
-                    case 1: /*SIMCALL*/
-                        if (semihosting_enabled()) {
-                            if (gen_check_privilege(dc)) {
-                                gen_helper_simcall(cpu_env);
-                            }
-                        } else {
-                            qemu_log_mask(LOG_GUEST_ERROR, "SIMCALL but semihosting is disabled\n");
-                            gen_exception_cause(dc, ILLEGAL_INSTRUCTION_CAUSE);
-                        }
-                        break;
-
-                    default:
-                        RESERVED();
-                        break;
-                    }
-                    break;
-
-                case 6: /*RSILx*/
-                    HAS_OPTION(XTENSA_OPTION_INTERRUPT);
-                    if (gen_check_privilege(dc) &&
-                        gen_window_check1(dc, RRR_T)) {
-                        tcg_gen_mov_i32(cpu_R[RRR_T], cpu_SR[PS]);
-                        tcg_gen_andi_i32(cpu_SR[PS], cpu_SR[PS], ~PS_INTLEVEL);
-                        tcg_gen_ori_i32(cpu_SR[PS], cpu_SR[PS], RRR_S);
-                        gen_check_interrupts(dc);
-                        gen_jumpi_check_loop_end(dc, 0);
-                    }
-                    break;
-
-                case 7: /*WAITIx*/
-                    HAS_OPTION(XTENSA_OPTION_INTERRUPT);
-                    if (gen_check_privilege(dc)) {
-                        gen_waiti(dc, RRR_S);
-                    }
-                    break;
-
-                case 8: /*ANY4p*/
-                case 9: /*ALL4p*/
-                case 10: /*ANY8p*/
-                case 11: /*ALL8p*/
-                    HAS_OPTION(XTENSA_OPTION_BOOLEAN);
-                    {
-                        const unsigned shift = (RRR_R & 2) ? 8 : 4;
-                        TCGv_i32 mask = tcg_const_i32(
-                                ((1 << shift) - 1) << RRR_S);
-                        TCGv_i32 tmp = tcg_temp_new_i32();
-
-                        tcg_gen_and_i32(tmp, cpu_SR[BR], mask);
-                        if (RRR_R & 1) { /*ALL*/
-                            tcg_gen_addi_i32(tmp, tmp, 1 << RRR_S);
-                        } else { /*ANY*/
-                            tcg_gen_add_i32(tmp, tmp, mask);
-                        }
-                        tcg_gen_shri_i32(tmp, tmp, RRR_S + shift);
-                        tcg_gen_deposit_i32(cpu_SR[BR], cpu_SR[BR],
-                                tmp, RRR_T, 1);
-                        tcg_temp_free(mask);
-                        tcg_temp_free(tmp);
-                    }
-                    break;
-
-                default: /*reserved*/
-                    RESERVED();
-                    break;
-
-                }
-                break;
-
-            case 1: /*AND*/
-                if (gen_window_check3(dc, RRR_R, RRR_S, RRR_T)) {
-                    tcg_gen_and_i32(cpu_R[RRR_R], cpu_R[RRR_S], cpu_R[RRR_T]);
-                }
-                break;
-
-            case 2: /*OR*/
-                if (gen_window_check3(dc, RRR_R, RRR_S, RRR_T)) {
-                    tcg_gen_or_i32(cpu_R[RRR_R], cpu_R[RRR_S], cpu_R[RRR_T]);
-                }
-                break;
-
-            case 3: /*XOR*/
-                if (gen_window_check3(dc, RRR_R, RRR_S, RRR_T)) {
-                    tcg_gen_xor_i32(cpu_R[RRR_R], cpu_R[RRR_S], cpu_R[RRR_T]);
-                }
-                break;
-
-            case 4: /*ST1*/
-                switch (RRR_R) {
-                case 0: /*SSR*/
-                    if (gen_window_check1(dc, RRR_S)) {
-                        gen_right_shift_sar(dc, cpu_R[RRR_S]);
-                    }
-                    break;
-
-                case 1: /*SSL*/
-                    if (gen_window_check1(dc, RRR_S)) {
-                        gen_left_shift_sar(dc, cpu_R[RRR_S]);
-                    }
-                    break;
-
-                case 2: /*SSA8L*/
-                    if (gen_window_check1(dc, RRR_S)) {
-                        TCGv_i32 tmp = tcg_temp_new_i32();
-                        tcg_gen_shli_i32(tmp, cpu_R[RRR_S], 3);
-                        gen_right_shift_sar(dc, tmp);
-                        tcg_temp_free(tmp);
-                    }
-                    break;
-
-                case 3: /*SSA8B*/
-                    if (gen_window_check1(dc, RRR_S)) {
-                        TCGv_i32 tmp = tcg_temp_new_i32();
-                        tcg_gen_shli_i32(tmp, cpu_R[RRR_S], 3);
-                        gen_left_shift_sar(dc, tmp);
-                        tcg_temp_free(tmp);
-                    }
-                    break;
-
-                case 4: /*SSAI*/
-                    {
-                        TCGv_i32 tmp = tcg_const_i32(
-                                RRR_S | ((RRR_T & 1) << 4));
-                        gen_right_shift_sar(dc, tmp);
-                        tcg_temp_free(tmp);
-                    }
-                    break;
-
-                case 6: /*RER*/
-                    HAS_OPTION(XTENSA_OPTION_EXTERN_REGS);
-                    if (gen_check_privilege(dc) &&
-                        gen_window_check2(dc, RRR_S, RRR_T)) {
-                        gen_helper_rer(cpu_R[RRR_T], cpu_env, cpu_R[RRR_S]);
-                    }
-                    break;
-
-                case 7: /*WER*/
-                    HAS_OPTION(XTENSA_OPTION_EXTERN_REGS);
-                    if (gen_check_privilege(dc) &&
-                        gen_window_check2(dc, RRR_S, RRR_T)) {
-                        gen_helper_wer(cpu_env, cpu_R[RRR_T], cpu_R[RRR_S]);
-                    }
-                    break;
-
-                case 8: /*ROTWw*/
-                    HAS_OPTION(XTENSA_OPTION_WINDOWED_REGISTER);
-                    if (gen_check_privilege(dc)) {
-                        TCGv_i32 tmp = tcg_const_i32(
-                                RRR_T | ((RRR_T & 8) ? 0xfffffff0 : 0));
-                        gen_helper_rotw(cpu_env, tmp);
-                        tcg_temp_free(tmp);
-                        /* This can change tb->flags, so exit tb */
-                        gen_jumpi_check_loop_end(dc, -1);
-                    }
-                    break;
-
-                case 14: /*NSAu*/
-                    HAS_OPTION(XTENSA_OPTION_MISC_OP_NSA);
-                    if (gen_window_check2(dc, RRR_S, RRR_T)) {
-                        tcg_gen_clrsb_i32(cpu_R[RRR_T], cpu_R[RRR_S]);
-                    }
-                    break;
-
-                case 15: /*NSAUu*/
-                    HAS_OPTION(XTENSA_OPTION_MISC_OP_NSA);
-                    if (gen_window_check2(dc, RRR_S, RRR_T)) {
-                        tcg_gen_clzi_i32(cpu_R[RRR_T], cpu_R[RRR_S], 32);
-                    }
-                    break;
-
-                default: /*reserved*/
-                    RESERVED();
-                    break;
-                }
-                break;
-
-            case 5: /*TLB*/
-                HAS_OPTION_BITS(
-                        XTENSA_OPTION_BIT(XTENSA_OPTION_MMU) |
-                        XTENSA_OPTION_BIT(XTENSA_OPTION_REGION_PROTECTION) |
-                        XTENSA_OPTION_BIT(XTENSA_OPTION_REGION_TRANSLATION));
-                if (gen_check_privilege(dc) &&
-                    gen_window_check2(dc, RRR_S, RRR_T)) {
-                    TCGv_i32 dtlb = tcg_const_i32((RRR_R & 8) != 0);
-
-                    switch (RRR_R & 7) {
-                    case 3: /*RITLB0*/ /*RDTLB0*/
-                        gen_helper_rtlb0(cpu_R[RRR_T],
-                                cpu_env, cpu_R[RRR_S], dtlb);
-                        break;
-
-                    case 4: /*IITLB*/ /*IDTLB*/
-                        gen_helper_itlb(cpu_env, cpu_R[RRR_S], dtlb);
-                        /* This could change memory mapping, so exit tb */
-                        gen_jumpi_check_loop_end(dc, -1);
-                        break;
-
-                    case 5: /*PITLB*/ /*PDTLB*/
-                        tcg_gen_movi_i32(cpu_pc, dc->pc);
-                        gen_helper_ptlb(cpu_R[RRR_T],
-                                cpu_env, cpu_R[RRR_S], dtlb);
-                        break;
-
-                    case 6: /*WITLB*/ /*WDTLB*/
-                        gen_helper_wtlb(
-                                cpu_env, cpu_R[RRR_T], cpu_R[RRR_S], dtlb);
-                        /* This could change memory mapping, so exit tb */
-                        gen_jumpi_check_loop_end(dc, -1);
-                        break;
-
-                    case 7: /*RITLB1*/ /*RDTLB1*/
-                        gen_helper_rtlb1(cpu_R[RRR_T],
-                                cpu_env, cpu_R[RRR_S], dtlb);
-                        break;
-
-                    default:
-                        tcg_temp_free(dtlb);
-                        RESERVED();
-                        break;
-                    }
-                    tcg_temp_free(dtlb);
-                }
-                break;
-
-            case 6: /*RT0*/
-                if (!gen_window_check2(dc, RRR_R, RRR_T)) {
-                    break;
-                }
-                switch (RRR_S) {
-                case 0: /*NEG*/
-                    tcg_gen_neg_i32(cpu_R[RRR_R], cpu_R[RRR_T]);
-                    break;
-
-                case 1: /*ABS*/
-                    {
-                        TCGv_i32 zero = tcg_const_i32(0);
-                        TCGv_i32 neg = tcg_temp_new_i32();
-
-                        tcg_gen_neg_i32(neg, cpu_R[RRR_T]);
-                        tcg_gen_movcond_i32(TCG_COND_GE, cpu_R[RRR_R],
-                                cpu_R[RRR_T], zero, cpu_R[RRR_T], neg);
-                        tcg_temp_free(neg);
-                        tcg_temp_free(zero);
-                    }
-                    break;
-
-                default: /*reserved*/
-                    RESERVED();
-                    break;
-                }
-                break;
-
-            case 7: /*reserved*/
-                RESERVED();
-                break;
-
-            case 8: /*ADD*/
-                if (gen_window_check3(dc, RRR_R, RRR_S, RRR_T)) {
-                    tcg_gen_add_i32(cpu_R[RRR_R], cpu_R[RRR_S], cpu_R[RRR_T]);
-                }
-                break;
-
-            case 9: /*ADD**/
-            case 10:
-            case 11:
-                if (gen_window_check3(dc, RRR_R, RRR_S, RRR_T)) {
-                    TCGv_i32 tmp = tcg_temp_new_i32();
-                    tcg_gen_shli_i32(tmp, cpu_R[RRR_S], OP2 - 8);
-                    tcg_gen_add_i32(cpu_R[RRR_R], tmp, cpu_R[RRR_T]);
-                    tcg_temp_free(tmp);
-                }
-                break;
-
-            case 12: /*SUB*/
-                if (gen_window_check3(dc, RRR_R, RRR_S, RRR_T)) {
-                    tcg_gen_sub_i32(cpu_R[RRR_R], cpu_R[RRR_S], cpu_R[RRR_T]);
-                }
-                break;
-
-            case 13: /*SUB**/
-            case 14:
-            case 15:
-                if (gen_window_check3(dc, RRR_R, RRR_S, RRR_T)) {
-                    TCGv_i32 tmp = tcg_temp_new_i32();
-                    tcg_gen_shli_i32(tmp, cpu_R[RRR_S], OP2 - 12);
-                    tcg_gen_sub_i32(cpu_R[RRR_R], tmp, cpu_R[RRR_T]);
-                    tcg_temp_free(tmp);
-                }
-                break;
-            }
-            break;
-
-        case 1: /*RST1*/
-            switch (OP2) {
-            case 0: /*SLLI*/
-            case 1:
-                if (gen_window_check2(dc, RRR_R, RRR_S)) {
-                    tcg_gen_shli_i32(cpu_R[RRR_R], cpu_R[RRR_S],
-                                     32 - (RRR_T | ((OP2 & 1) << 4)));
-                }
-                break;
-
-            case 2: /*SRAI*/
-            case 3:
-                if (gen_window_check2(dc, RRR_R, RRR_T)) {
-                    tcg_gen_sari_i32(cpu_R[RRR_R], cpu_R[RRR_T],
-                                     RRR_S | ((OP2 & 1) << 4));
-                }
-                break;
-
-            case 4: /*SRLI*/
-                if (gen_window_check2(dc, RRR_R, RRR_T)) {
-                    tcg_gen_shri_i32(cpu_R[RRR_R], cpu_R[RRR_T], RRR_S);
-                }
-                break;
-
-            case 6: /*XSR*/
-                if (gen_check_sr(dc, RSR_SR, SR_X) &&
-                    (RSR_SR < 64 || gen_check_privilege(dc)) &&
-                    gen_window_check1(dc, RRR_T)) {
-                    TCGv_i32 tmp = tcg_temp_new_i32();
-                    bool rsr_end, wsr_end;
-
-                    tcg_gen_mov_i32(tmp, cpu_R[RRR_T]);
-                    rsr_end = gen_rsr(dc, cpu_R[RRR_T], RSR_SR);
-                    wsr_end = gen_wsr(dc, RSR_SR, tmp);
-                    tcg_temp_free(tmp);
-                    if (rsr_end && !wsr_end) {
-                        gen_jumpi_check_loop_end(dc, 0);
-                    }
-                }
-                break;
-
-                /*
-                 * Note: 64 bit ops are used here solely because SAR values
-                 * have range 0..63
-                 */
-#define gen_shift_reg(cmd, reg) do { \
-                    TCGv_i64 tmp = tcg_temp_new_i64(); \
-                    tcg_gen_extu_i32_i64(tmp, reg); \
-                    tcg_gen_##cmd##_i64(v, v, tmp); \
-                    tcg_gen_extrl_i64_i32(cpu_R[RRR_R], v); \
-                    tcg_temp_free_i64(v); \
-                    tcg_temp_free_i64(tmp); \
-                } while (0)
-
-#define gen_shift(cmd) gen_shift_reg(cmd, cpu_SR[SAR])
-
-            case 8: /*SRC*/
-                if (gen_window_check3(dc, RRR_R, RRR_S, RRR_T)) {
-                    TCGv_i64 v = tcg_temp_new_i64();
-                    tcg_gen_concat_i32_i64(v, cpu_R[RRR_T], cpu_R[RRR_S]);
-                    gen_shift(shr);
-                }
-                break;
-
-            case 9: /*SRL*/
-                if (!gen_window_check2(dc, RRR_R, RRR_T)) {
-                    break;
-                }
-                if (dc->sar_5bit) {
-                    tcg_gen_shr_i32(cpu_R[RRR_R], cpu_R[RRR_T], cpu_SR[SAR]);
-                } else {
-                    TCGv_i64 v = tcg_temp_new_i64();
-                    tcg_gen_extu_i32_i64(v, cpu_R[RRR_T]);
-                    gen_shift(shr);
-                }
-                break;
-
-            case 10: /*SLL*/
-                if (!gen_window_check2(dc, RRR_R, RRR_S)) {
-                    break;
-                }
-                if (dc->sar_m32_5bit) {
-                    tcg_gen_shl_i32(cpu_R[RRR_R], cpu_R[RRR_S], dc->sar_m32);
-                } else {
-                    TCGv_i64 v = tcg_temp_new_i64();
-                    TCGv_i32 s = tcg_const_i32(32);
-                    tcg_gen_sub_i32(s, s, cpu_SR[SAR]);
-                    tcg_gen_andi_i32(s, s, 0x3f);
-                    tcg_gen_extu_i32_i64(v, cpu_R[RRR_S]);
-                    gen_shift_reg(shl, s);
-                    tcg_temp_free(s);
-                }
-                break;
-
-            case 11: /*SRA*/
-                if (!gen_window_check2(dc, RRR_R, RRR_T)) {
-                    break;
-                }
-                if (dc->sar_5bit) {
-                    tcg_gen_sar_i32(cpu_R[RRR_R], cpu_R[RRR_T], cpu_SR[SAR]);
-                } else {
-                    TCGv_i64 v = tcg_temp_new_i64();
-                    tcg_gen_ext_i32_i64(v, cpu_R[RRR_T]);
-                    gen_shift(sar);
-                }
-                break;
-#undef gen_shift
-#undef gen_shift_reg
-
-            case 12: /*MUL16U*/
-                HAS_OPTION(XTENSA_OPTION_16_BIT_IMUL);
-                if (gen_window_check3(dc, RRR_R, RRR_S, RRR_T)) {
-                    TCGv_i32 v1 = tcg_temp_new_i32();
-                    TCGv_i32 v2 = tcg_temp_new_i32();
-                    tcg_gen_ext16u_i32(v1, cpu_R[RRR_S]);
-                    tcg_gen_ext16u_i32(v2, cpu_R[RRR_T]);
-                    tcg_gen_mul_i32(cpu_R[RRR_R], v1, v2);
-                    tcg_temp_free(v2);
-                    tcg_temp_free(v1);
-                }
-                break;
-
-            case 13: /*MUL16S*/
-                HAS_OPTION(XTENSA_OPTION_16_BIT_IMUL);
-                if (gen_window_check3(dc, RRR_R, RRR_S, RRR_T)) {
-                    TCGv_i32 v1 = tcg_temp_new_i32();
-                    TCGv_i32 v2 = tcg_temp_new_i32();
-                    tcg_gen_ext16s_i32(v1, cpu_R[RRR_S]);
-                    tcg_gen_ext16s_i32(v2, cpu_R[RRR_T]);
-                    tcg_gen_mul_i32(cpu_R[RRR_R], v1, v2);
-                    tcg_temp_free(v2);
-                    tcg_temp_free(v1);
-                }
-                break;
-
-            default: /*reserved*/
-                RESERVED();
-                break;
-            }
-            break;
-
-        case 2: /*RST2*/
-            if (OP2 >= 8 && !gen_window_check3(dc, RRR_R, RRR_S, RRR_T)) {
-                break;
-            }
-
-            if (OP2 >= 12) {
-                HAS_OPTION(XTENSA_OPTION_32_BIT_IDIV);
-                TCGLabel *label = gen_new_label();
-                tcg_gen_brcondi_i32(TCG_COND_NE, cpu_R[RRR_T], 0, label);
-                gen_exception_cause(dc, INTEGER_DIVIDE_BY_ZERO_CAUSE);
-                gen_set_label(label);
-            }
-
-            switch (OP2) {
-#define BOOLEAN_LOGIC(fn, r, s, t) \
-                do { \
-                    HAS_OPTION(XTENSA_OPTION_BOOLEAN); \
-                    TCGv_i32 tmp1 = tcg_temp_new_i32(); \
-                    TCGv_i32 tmp2 = tcg_temp_new_i32(); \
-                    \
-                    tcg_gen_shri_i32(tmp1, cpu_SR[BR], s); \
-                    tcg_gen_shri_i32(tmp2, cpu_SR[BR], t); \
-                    tcg_gen_##fn##_i32(tmp1, tmp1, tmp2); \
-                    tcg_gen_deposit_i32(cpu_SR[BR], cpu_SR[BR], tmp1, r, 1); \
-                    tcg_temp_free(tmp1); \
-                    tcg_temp_free(tmp2); \
-                } while (0)
-
-            case 0: /*ANDBp*/
-                BOOLEAN_LOGIC(and, RRR_R, RRR_S, RRR_T);
-                break;
-
-            case 1: /*ANDBCp*/
-                BOOLEAN_LOGIC(andc, RRR_R, RRR_S, RRR_T);
-                break;
-
-            case 2: /*ORBp*/
-                BOOLEAN_LOGIC(or, RRR_R, RRR_S, RRR_T);
-                break;
-
-            case 3: /*ORBCp*/
-                BOOLEAN_LOGIC(orc, RRR_R, RRR_S, RRR_T);
-                break;
-
-            case 4: /*XORBp*/
-                BOOLEAN_LOGIC(xor, RRR_R, RRR_S, RRR_T);
-                break;
-
-#undef BOOLEAN_LOGIC
-
-            case 8: /*MULLi*/
-                HAS_OPTION(XTENSA_OPTION_32_BIT_IMUL);
-                tcg_gen_mul_i32(cpu_R[RRR_R], cpu_R[RRR_S], cpu_R[RRR_T]);
-                break;
-
-            case 10: /*MULUHi*/
-            case 11: /*MULSHi*/
-                HAS_OPTION(XTENSA_OPTION_32_BIT_IMUL_HIGH);
-                {
-                    TCGv lo = tcg_temp_new();
-
-                    if (OP2 == 10) {
-                        tcg_gen_mulu2_i32(lo, cpu_R[RRR_R],
-                                          cpu_R[RRR_S], cpu_R[RRR_T]);
-                    } else {
-                        tcg_gen_muls2_i32(lo, cpu_R[RRR_R],
-                                          cpu_R[RRR_S], cpu_R[RRR_T]);
-                    }
-                    tcg_temp_free(lo);
-                }
-                break;
-
-            case 12: /*QUOUi*/
-                tcg_gen_divu_i32(cpu_R[RRR_R], cpu_R[RRR_S], cpu_R[RRR_T]);
-                break;
-
-            case 13: /*QUOSi*/
-            case 15: /*REMSi*/
-                {
-                    TCGLabel *label1 = gen_new_label();
-                    TCGLabel *label2 = gen_new_label();
-
-                    tcg_gen_brcondi_i32(TCG_COND_NE, cpu_R[RRR_S], 0x80000000,
-                            label1);
-                    tcg_gen_brcondi_i32(TCG_COND_NE, cpu_R[RRR_T], 0xffffffff,
-                            label1);
-                    tcg_gen_movi_i32(cpu_R[RRR_R],
-                            OP2 == 13 ? 0x80000000 : 0);
-                    tcg_gen_br(label2);
-                    gen_set_label(label1);
-                    if (OP2 == 13) {
-                        tcg_gen_div_i32(cpu_R[RRR_R],
-                                cpu_R[RRR_S], cpu_R[RRR_T]);
-                    } else {
-                        tcg_gen_rem_i32(cpu_R[RRR_R],
-                                cpu_R[RRR_S], cpu_R[RRR_T]);
-                    }
-                    gen_set_label(label2);
-                }
-                break;
-
-            case 14: /*REMUi*/
-                tcg_gen_remu_i32(cpu_R[RRR_R], cpu_R[RRR_S], cpu_R[RRR_T]);
-                break;
-
-            default: /*reserved*/
-                RESERVED();
-                break;
-            }
-            break;
-
-        case 3: /*RST3*/
-            switch (OP2) {
-            case 0: /*RSR*/
-                if (gen_check_sr(dc, RSR_SR, SR_R) &&
-                    (RSR_SR < 64 || gen_check_privilege(dc)) &&
-                    gen_window_check1(dc, RRR_T)) {
-                    if (gen_rsr(dc, cpu_R[RRR_T], RSR_SR)) {
-                        gen_jumpi_check_loop_end(dc, 0);
-                    }
-                }
-                break;
-
-            case 1: /*WSR*/
-                if (gen_check_sr(dc, RSR_SR, SR_W) &&
-                    (RSR_SR < 64 || gen_check_privilege(dc)) &&
-                    gen_window_check1(dc, RRR_T)) {
-                    gen_wsr(dc, RSR_SR, cpu_R[RRR_T]);
-                }
-                break;
-
-            case 2: /*SEXTu*/
-                HAS_OPTION(XTENSA_OPTION_MISC_OP_SEXT);
-                if (gen_window_check2(dc, RRR_R, RRR_S)) {
-                    int shift = 24 - RRR_T;
-
-                    if (shift == 24) {
-                        tcg_gen_ext8s_i32(cpu_R[RRR_R], cpu_R[RRR_S]);
-                    } else if (shift == 16) {
-                        tcg_gen_ext16s_i32(cpu_R[RRR_R], cpu_R[RRR_S]);
-                    } else {
-                        TCGv_i32 tmp = tcg_temp_new_i32();
-                        tcg_gen_shli_i32(tmp, cpu_R[RRR_S], shift);
-                        tcg_gen_sari_i32(cpu_R[RRR_R], tmp, shift);
-                        tcg_temp_free(tmp);
-                    }
-                }
-                break;
-
-            case 3: /*CLAMPSu*/
-                HAS_OPTION(XTENSA_OPTION_MISC_OP_CLAMPS);
-                if (gen_window_check2(dc, RRR_R, RRR_S)) {
-                    TCGv_i32 tmp1 = tcg_temp_new_i32();
-                    TCGv_i32 tmp2 = tcg_temp_new_i32();
-                    TCGv_i32 zero = tcg_const_i32(0);
-
-                    tcg_gen_sari_i32(tmp1, cpu_R[RRR_S], 24 - RRR_T);
-                    tcg_gen_xor_i32(tmp2, tmp1, cpu_R[RRR_S]);
-                    tcg_gen_andi_i32(tmp2, tmp2, 0xffffffff << (RRR_T + 7));
-
-                    tcg_gen_sari_i32(tmp1, cpu_R[RRR_S], 31);
-                    tcg_gen_xori_i32(tmp1, tmp1, 0xffffffff >> (25 - RRR_T));
-
-                    tcg_gen_movcond_i32(TCG_COND_EQ, cpu_R[RRR_R], tmp2, zero,
-                            cpu_R[RRR_S], tmp1);
-                    tcg_temp_free(tmp1);
-                    tcg_temp_free(tmp2);
-                    tcg_temp_free(zero);
-                }
-                break;
-
-            case 4: /*MINu*/
-            case 5: /*MAXu*/
-            case 6: /*MINUu*/
-            case 7: /*MAXUu*/
-                HAS_OPTION(XTENSA_OPTION_MISC_OP_MINMAX);
-                if (gen_window_check3(dc, RRR_R, RRR_S, RRR_T)) {
-                    static const TCGCond cond[] = {
-                        TCG_COND_LE,
-                        TCG_COND_GE,
-                        TCG_COND_LEU,
-                        TCG_COND_GEU
-                    };
-                    tcg_gen_movcond_i32(cond[OP2 - 4], cpu_R[RRR_R],
-                            cpu_R[RRR_S], cpu_R[RRR_T],
-                            cpu_R[RRR_S], cpu_R[RRR_T]);
-                }
-                break;
-
-            case 8: /*MOVEQZ*/
-            case 9: /*MOVNEZ*/
-            case 10: /*MOVLTZ*/
-            case 11: /*MOVGEZ*/
-                if (gen_window_check3(dc, RRR_R, RRR_S, RRR_T)) {
-                    static const TCGCond cond[] = {
-                        TCG_COND_EQ,
-                        TCG_COND_NE,
-                        TCG_COND_LT,
-                        TCG_COND_GE,
-                    };
-                    TCGv_i32 zero = tcg_const_i32(0);
-
-                    tcg_gen_movcond_i32(cond[OP2 - 8], cpu_R[RRR_R],
-                            cpu_R[RRR_T], zero, cpu_R[RRR_S], cpu_R[RRR_R]);
-                    tcg_temp_free(zero);
-                }
-                break;
-
-            case 12: /*MOVFp*/
-            case 13: /*MOVTp*/
-                HAS_OPTION(XTENSA_OPTION_BOOLEAN);
-                if (gen_window_check2(dc, RRR_R, RRR_S)) {
-                    TCGv_i32 zero = tcg_const_i32(0);
-                    TCGv_i32 tmp = tcg_temp_new_i32();
-
-                    tcg_gen_andi_i32(tmp, cpu_SR[BR], 1 << RRR_T);
-                    tcg_gen_movcond_i32(OP2 & 1 ? TCG_COND_NE : TCG_COND_EQ,
-                            cpu_R[RRR_R], tmp, zero,
-                            cpu_R[RRR_S], cpu_R[RRR_R]);
-
-                    tcg_temp_free(tmp);
-                    tcg_temp_free(zero);
-                }
-                break;
-
-            case 14: /*RUR*/
-                if (gen_window_check1(dc, RRR_R)) {
-                    int st = (RRR_S << 4) + RRR_T;
-                    if (uregnames[st].name) {
-                        tcg_gen_mov_i32(cpu_R[RRR_R], cpu_UR[st]);
-                    } else {
-                        qemu_log_mask(LOG_UNIMP, "RUR %d not implemented, ", st);
-                        TBD();
-                    }
-                }
-                break;
-
-            case 15: /*WUR*/
-                if (gen_window_check1(dc, RRR_T)) {
-                    if (uregnames[RSR_SR].name) {
-                        gen_wur(RSR_SR, cpu_R[RRR_T]);
-                    } else {
-                        qemu_log_mask(LOG_UNIMP, "WUR %d not implemented, ", RSR_SR);
-                        TBD();
-                    }
-                }
-                break;
-
-            }
-            break;
-
-        case 4: /*EXTUI*/
-        case 5:
-            if (gen_window_check2(dc, RRR_R, RRR_T)) {
-                int shiftimm = RRR_S | ((OP1 & 1) << 4);
-                int maskimm = (1 << (OP2 + 1)) - 1;
-
-                TCGv_i32 tmp = tcg_temp_new_i32();
-                tcg_gen_shri_i32(tmp, cpu_R[RRR_T], shiftimm);
-                tcg_gen_andi_i32(cpu_R[RRR_R], tmp, maskimm);
-                tcg_temp_free(tmp);
-            }
-            break;
-
-        case 6: /*CUST0*/
-            RESERVED();
-            break;
-
-        case 7: /*CUST1*/
-            RESERVED();
-            break;
-
-        case 8: /*LSCXp*/
-            switch (OP2) {
-            case 0: /*LSXf*/
-            case 1: /*LSXUf*/
-            case 4: /*SSXf*/
-            case 5: /*SSXUf*/
-                HAS_OPTION(XTENSA_OPTION_FP_COPROCESSOR);
-                if (gen_window_check2(dc, RRR_S, RRR_T) &&
-                    gen_check_cpenable(dc, 0)) {
-                    TCGv_i32 addr = tcg_temp_new_i32();
-                    tcg_gen_add_i32(addr, cpu_R[RRR_S], cpu_R[RRR_T]);
-                    gen_load_store_alignment(dc, 2, addr, false);
-                    if (OP2 & 0x4) {
-                        tcg_gen_qemu_st32(cpu_FR[RRR_R], addr, dc->cring);
-                    } else {
-                        tcg_gen_qemu_ld32u(cpu_FR[RRR_R], addr, dc->cring);
-                    }
-                    if (OP2 & 0x1) {
-                        tcg_gen_mov_i32(cpu_R[RRR_S], addr);
-                    }
-                    tcg_temp_free(addr);
-                }
-                break;
-
-            default: /*reserved*/
-                RESERVED();
-                break;
-            }
-            break;
-
-        case 9: /*LSC4*/
-            if (!gen_window_check2(dc, RRR_S, RRR_T)) {
-                break;
-            }
-            switch (OP2) {
-            case 0: /*L32E*/
-                HAS_OPTION(XTENSA_OPTION_WINDOWED_REGISTER);
-                if (gen_check_privilege(dc) &&
-                    gen_window_check2(dc, RRR_S, RRR_T)) {
-                    TCGv_i32 addr = tcg_temp_new_i32();
-                    tcg_gen_addi_i32(addr, cpu_R[RRR_S],
-                            (0xffffffc0 | (RRR_R << 2)));
-                    tcg_gen_qemu_ld32u(cpu_R[RRR_T], addr, dc->ring);
-                    tcg_temp_free(addr);
-                }
-                break;
-
-            case 4: /*S32E*/
-                HAS_OPTION(XTENSA_OPTION_WINDOWED_REGISTER);
-                if (gen_check_privilege(dc) &&
-                    gen_window_check2(dc, RRR_S, RRR_T)) {
-                    TCGv_i32 addr = tcg_temp_new_i32();
-                    tcg_gen_addi_i32(addr, cpu_R[RRR_S],
-                            (0xffffffc0 | (RRR_R << 2)));
-                    tcg_gen_qemu_st32(cpu_R[RRR_T], addr, dc->ring);
-                    tcg_temp_free(addr);
-                }
-                break;
-
-            case 5: /*S32N*/
-                if (gen_window_check2(dc, RRI4_S, RRI4_T)) {
-                    TCGv_i32 addr = tcg_temp_new_i32();
-
-                    tcg_gen_addi_i32(addr, cpu_R[RRI4_S], RRI4_IMM4 << 2);
-                    gen_load_store_alignment(dc, 2, addr, false);
-                    tcg_gen_qemu_st32(cpu_R[RRI4_T], addr, dc->cring);
-                    tcg_temp_free(addr);
-                }
-                break;
-
-            default:
-                RESERVED();
-                break;
-            }
-            break;
-
-        case 10: /*FP0*/
-            /*DEPBITS*/
-            if (option_enabled(dc, XTENSA_OPTION_DEPBITS)) {
-                if (!gen_window_check2(dc, RRR_S, RRR_T)) {
-                    break;
-                }
-                tcg_gen_deposit_i32(cpu_R[RRR_T], cpu_R[RRR_T], cpu_R[RRR_S],
-                                    OP2, RRR_R + 1);
-                break;
-            }
-
-            HAS_OPTION(XTENSA_OPTION_FP_COPROCESSOR);
-            switch (OP2) {
-            case 0: /*ADD.Sf*/
-                if (gen_check_cpenable(dc, 0)) {
-                    gen_helper_add_s(cpu_FR[RRR_R], cpu_env,
-                                     cpu_FR[RRR_S], cpu_FR[RRR_T]);
-                }
-                break;
-
-            case 1: /*SUB.Sf*/
-                if (gen_check_cpenable(dc, 0)) {
-                    gen_helper_sub_s(cpu_FR[RRR_R], cpu_env,
-                                     cpu_FR[RRR_S], cpu_FR[RRR_T]);
-                }
-                break;
-
-            case 2: /*MUL.Sf*/
-                if (gen_check_cpenable(dc, 0)) {
-                    gen_helper_mul_s(cpu_FR[RRR_R], cpu_env,
-                                     cpu_FR[RRR_S], cpu_FR[RRR_T]);
-                }
-                break;
-
-            case 4: /*MADD.Sf*/
-                if (gen_check_cpenable(dc, 0)) {
-                    gen_helper_madd_s(cpu_FR[RRR_R], cpu_env,
-                                      cpu_FR[RRR_R], cpu_FR[RRR_S],
-                                      cpu_FR[RRR_T]);
-                }
-                break;
-
-            case 5: /*MSUB.Sf*/
-                if (gen_check_cpenable(dc, 0)) {
-                    gen_helper_msub_s(cpu_FR[RRR_R], cpu_env,
-                                      cpu_FR[RRR_R], cpu_FR[RRR_S],
-                                      cpu_FR[RRR_T]);
-                }
-                break;
-
-            case 8: /*ROUND.Sf*/
-            case 9: /*TRUNC.Sf*/
-            case 10: /*FLOOR.Sf*/
-            case 11: /*CEIL.Sf*/
-            case 14: /*UTRUNC.Sf*/
-                if (gen_window_check1(dc, RRR_R) &&
-                    gen_check_cpenable(dc, 0)) {
-                    static const unsigned rounding_mode_const[] = {
-                        float_round_nearest_even,
-                        float_round_to_zero,
-                        float_round_down,
-                        float_round_up,
-                        [6] = float_round_to_zero,
-                    };
-                    TCGv_i32 rounding_mode = tcg_const_i32(
-                            rounding_mode_const[OP2 & 7]);
-                    TCGv_i32 scale = tcg_const_i32(RRR_T);
-
-                    if (OP2 == 14) {
-                        gen_helper_ftoui(cpu_R[RRR_R], cpu_FR[RRR_S],
-                                rounding_mode, scale);
-                    } else {
-                        gen_helper_ftoi(cpu_R[RRR_R], cpu_FR[RRR_S],
-                                rounding_mode, scale);
-                    }
-
-                    tcg_temp_free(rounding_mode);
-                    tcg_temp_free(scale);
-                }
-                break;
-
-            case 12: /*FLOAT.Sf*/
-            case 13: /*UFLOAT.Sf*/
-                if (gen_window_check1(dc, RRR_S) &&
-                    gen_check_cpenable(dc, 0)) {
-                    TCGv_i32 scale = tcg_const_i32(-RRR_T);
-
-                    if (OP2 == 13) {
-                        gen_helper_uitof(cpu_FR[RRR_R], cpu_env,
-                                cpu_R[RRR_S], scale);
-                    } else {
-                        gen_helper_itof(cpu_FR[RRR_R], cpu_env,
-                                cpu_R[RRR_S], scale);
-                    }
-                    tcg_temp_free(scale);
-                }
-                break;
-
-            case 15: /*FP1OP*/
-                switch (RRR_T) {
-                case 0: /*MOV.Sf*/
-                    if (gen_check_cpenable(dc, 0)) {
-                        tcg_gen_mov_i32(cpu_FR[RRR_R], cpu_FR[RRR_S]);
-                    }
-                    break;
-
-                case 1: /*ABS.Sf*/
-                    if (gen_check_cpenable(dc, 0)) {
-                        gen_helper_abs_s(cpu_FR[RRR_R], cpu_FR[RRR_S]);
-                    }
-                    break;
-
-                case 4: /*RFRf*/
-                    if (gen_window_check1(dc, RRR_R) &&
-                        gen_check_cpenable(dc, 0)) {
-                        tcg_gen_mov_i32(cpu_R[RRR_R], cpu_FR[RRR_S]);
-                    }
-                    break;
-
-                case 5: /*WFRf*/
-                    if (gen_window_check1(dc, RRR_S) &&
-                        gen_check_cpenable(dc, 0)) {
-                        tcg_gen_mov_i32(cpu_FR[RRR_R], cpu_R[RRR_S]);
-                    }
-                    break;
-
-                case 6: /*NEG.Sf*/
-                    if (gen_check_cpenable(dc, 0)) {
-                        gen_helper_neg_s(cpu_FR[RRR_R], cpu_FR[RRR_S]);
-                    }
-                    break;
-
-                default: /*reserved*/
-                    RESERVED();
-                    break;
-                }
-                break;
-
-            default: /*reserved*/
-                RESERVED();
-                break;
-            }
-            break;
-
-        case 11: /*FP1*/
-            /*DEPBITS*/
-            if (option_enabled(dc, XTENSA_OPTION_DEPBITS)) {
-                if (!gen_window_check2(dc, RRR_S, RRR_T)) {
-                    break;
-                }
-                tcg_gen_deposit_i32(cpu_R[RRR_T], cpu_R[RRR_T], cpu_R[RRR_S],
-                                    OP2 + 16, RRR_R + 1);
-                break;
-            }
-
-            HAS_OPTION(XTENSA_OPTION_FP_COPROCESSOR);
-
-#define gen_compare(rel, br, a, b) \
-    do { \
-        if (gen_check_cpenable(dc, 0)) { \
-            TCGv_i32 bit = tcg_const_i32(1 << br); \
-            \
-            gen_helper_##rel(cpu_env, bit, cpu_FR[a], cpu_FR[b]); \
-            tcg_temp_free(bit); \
-        } \
-    } while (0)
-
-            switch (OP2) {
-            case 1: /*UN.Sf*/
-                gen_compare(un_s, RRR_R, RRR_S, RRR_T);
-                break;
-
-            case 2: /*OEQ.Sf*/
-                gen_compare(oeq_s, RRR_R, RRR_S, RRR_T);
-                break;
-
-            case 3: /*UEQ.Sf*/
-                gen_compare(ueq_s, RRR_R, RRR_S, RRR_T);
-                break;
-
-            case 4: /*OLT.Sf*/
-                gen_compare(olt_s, RRR_R, RRR_S, RRR_T);
-                break;
-
-            case 5: /*ULT.Sf*/
-                gen_compare(ult_s, RRR_R, RRR_S, RRR_T);
-                break;
-
-            case 6: /*OLE.Sf*/
-                gen_compare(ole_s, RRR_R, RRR_S, RRR_T);
-                break;
-
-            case 7: /*ULE.Sf*/
-                gen_compare(ule_s, RRR_R, RRR_S, RRR_T);
-                break;
-
-#undef gen_compare
-
-            case 8: /*MOVEQZ.Sf*/
-            case 9: /*MOVNEZ.Sf*/
-            case 10: /*MOVLTZ.Sf*/
-            case 11: /*MOVGEZ.Sf*/
-                if (gen_window_check1(dc, RRR_T) &&
-                    gen_check_cpenable(dc, 0)) {
-                    static const TCGCond cond[] = {
-                        TCG_COND_EQ,
-                        TCG_COND_NE,
-                        TCG_COND_LT,
-                        TCG_COND_GE,
-                    };
-                    TCGv_i32 zero = tcg_const_i32(0);
-
-                    tcg_gen_movcond_i32(cond[OP2 - 8], cpu_FR[RRR_R],
-                            cpu_R[RRR_T], zero, cpu_FR[RRR_S], cpu_FR[RRR_R]);
-                    tcg_temp_free(zero);
-                }
-                break;
-
-            case 12: /*MOVF.Sf*/
-            case 13: /*MOVT.Sf*/
-                HAS_OPTION(XTENSA_OPTION_BOOLEAN);
-                if (gen_check_cpenable(dc, 0)) {
-                    TCGv_i32 zero = tcg_const_i32(0);
-                    TCGv_i32 tmp = tcg_temp_new_i32();
-
-                    tcg_gen_andi_i32(tmp, cpu_SR[BR], 1 << RRR_T);
-                    tcg_gen_movcond_i32(OP2 & 1 ? TCG_COND_NE : TCG_COND_EQ,
-                            cpu_FR[RRR_R], tmp, zero,
-                            cpu_FR[RRR_S], cpu_FR[RRR_R]);
-
-                    tcg_temp_free(tmp);
-                    tcg_temp_free(zero);
-                }
-                break;
-
-            default: /*reserved*/
-                RESERVED();
-                break;
-            }
-            break;
-
-        default: /*reserved*/
-            RESERVED();
-            break;
-        }
-        break;
-
-    case 1: /*L32R*/
-        if (gen_window_check1(dc, RRR_T)) {
-            TCGv_i32 tmp = tcg_const_i32(
-                    ((dc->tb->flags & XTENSA_TBFLAG_LITBASE) ?
-                     0 : ((dc->pc + 3) & ~3)) +
-                    (0xfffc0000 | (RI16_IMM16 << 2)));
-
-            if (dc->tb->flags & XTENSA_TBFLAG_LITBASE) {
-                tcg_gen_add_i32(tmp, tmp, dc->litbase);
-            }
-            tcg_gen_qemu_ld32u(cpu_R[RRR_T], tmp, dc->cring);
-            tcg_temp_free(tmp);
-        }
-        break;
-
-    case 2: /*LSAI*/
-#define gen_load_store(type, shift) do { \
-            if (gen_window_check2(dc, RRI8_S, RRI8_T)) { \
-                TCGv_i32 addr = tcg_temp_new_i32(); \
-                \
-                tcg_gen_addi_i32(addr, cpu_R[RRI8_S], RRI8_IMM8 << shift); \
-                if (shift) { \
-                    gen_load_store_alignment(dc, shift, addr, false); \
-                } \
-                tcg_gen_qemu_##type(cpu_R[RRI8_T], addr, dc->cring); \
-                tcg_temp_free(addr); \
-            } \
-        } while (0)
-
-        switch (RRI8_R) {
-        case 0: /*L8UI*/
-            gen_load_store(ld8u, 0);
-            break;
-
-        case 1: /*L16UI*/
-            gen_load_store(ld16u, 1);
-            break;
-
-        case 2: /*L32I*/
-            gen_load_store(ld32u, 2);
-            break;
-
-        case 4: /*S8I*/
-            gen_load_store(st8, 0);
-            break;
-
-        case 5: /*S16I*/
-            gen_load_store(st16, 1);
-            break;
-
-        case 6: /*S32I*/
-            gen_load_store(st32, 2);
-            break;
-
-#define gen_dcache_hit_test(w, shift) do { \
-            if (gen_window_check1(dc, RRI##w##_S)) { \
-                TCGv_i32 addr = tcg_temp_new_i32(); \
-                TCGv_i32 res = tcg_temp_new_i32(); \
-                tcg_gen_addi_i32(addr, cpu_R[RRI##w##_S], \
-                                 RRI##w##_IMM##w << shift); \
-                tcg_gen_qemu_ld8u(res, addr, dc->cring); \
-                tcg_temp_free(addr); \
-                tcg_temp_free(res); \
-            } \
-        } while (0)
-
-#define gen_dcache_hit_test4() gen_dcache_hit_test(4, 4)
-#define gen_dcache_hit_test8() gen_dcache_hit_test(8, 2)
-
-        case 7: /*CACHEc*/
-            if (RRI8_T < 8) {
-                HAS_OPTION(XTENSA_OPTION_DCACHE);
-            }
-
-            switch (RRI8_T) {
-            case 0: /*DPFRc*/
-                gen_window_check1(dc, RRI8_S);
-                break;
-
-            case 1: /*DPFWc*/
-                gen_window_check1(dc, RRI8_S);
-                break;
-
-            case 2: /*DPFROc*/
-                gen_window_check1(dc, RRI8_S);
-                break;
-
-            case 3: /*DPFWOc*/
-                gen_window_check1(dc, RRI8_S);
-                break;
-
-            case 4: /*DHWBc*/
-                gen_dcache_hit_test8();
-                break;
-
-            case 5: /*DHWBIc*/
-                gen_dcache_hit_test8();
-                break;
-
-            case 6: /*DHIc*/
-                if (gen_check_privilege(dc)) {
-                    gen_dcache_hit_test8();
-                }
-                break;
-
-            case 7: /*DIIc*/
-                if (gen_check_privilege(dc)) {
-                    gen_window_check1(dc, RRI8_S);
-                }
-                break;
-
-            case 8: /*DCEc*/
-                switch (OP1) {
-                case 0: /*DPFLl*/
-                    HAS_OPTION(XTENSA_OPTION_DCACHE_INDEX_LOCK);
-                    if (gen_check_privilege(dc)) {
-                        gen_dcache_hit_test4();
-                    }
-                    break;
-
-                case 2: /*DHUl*/
-                    HAS_OPTION(XTENSA_OPTION_DCACHE_INDEX_LOCK);
-                    if (gen_check_privilege(dc)) {
-                        gen_dcache_hit_test4();
-                    }
-                    break;
-
-                case 3: /*DIUl*/
-                    HAS_OPTION(XTENSA_OPTION_DCACHE_INDEX_LOCK);
-                    if (gen_check_privilege(dc)) {
-                        gen_window_check1(dc, RRI4_S);
-                    }
-                    break;
-
-                case 4: /*DIWBc*/
-                    HAS_OPTION(XTENSA_OPTION_DCACHE);
-                    if (gen_check_privilege(dc)) {
-                        gen_window_check1(dc, RRI4_S);
-                    }
-                    break;
-
-                case 5: /*DIWBIc*/
-                    HAS_OPTION(XTENSA_OPTION_DCACHE);
-                    if (gen_check_privilege(dc)) {
-                        gen_window_check1(dc, RRI4_S);
-                    }
-                    break;
-
-                default: /*reserved*/
-                    RESERVED();
-                    break;
-
-                }
-                break;
-
-#undef gen_dcache_hit_test
-#undef gen_dcache_hit_test4
-#undef gen_dcache_hit_test8
-
-#define gen_icache_hit_test(w, shift) do { \
-            if (gen_window_check1(dc, RRI##w##_S)) { \
-                TCGv_i32 addr = tcg_temp_new_i32(); \
-                tcg_gen_movi_i32(cpu_pc, dc->pc); \
-                tcg_gen_addi_i32(addr, cpu_R[RRI##w##_S], \
-                                 RRI##w##_IMM##w << shift); \
-                gen_helper_itlb_hit_test(cpu_env, addr); \
-                tcg_temp_free(addr); \
-            }\
-        } while (0)
-
-#define gen_icache_hit_test4() gen_icache_hit_test(4, 4)
-#define gen_icache_hit_test8() gen_icache_hit_test(8, 2)
-
-            case 12: /*IPFc*/
-                HAS_OPTION(XTENSA_OPTION_ICACHE);
-                gen_window_check1(dc, RRI8_S);
-                break;
-
-            case 13: /*ICEc*/
-                switch (OP1) {
-                case 0: /*IPFLl*/
-                    HAS_OPTION(XTENSA_OPTION_ICACHE_INDEX_LOCK);
-                    if (gen_check_privilege(dc)) {
-                        gen_icache_hit_test4();
-                    }
-                    break;
-
-                case 2: /*IHUl*/
-                    HAS_OPTION(XTENSA_OPTION_ICACHE_INDEX_LOCK);
-                    if (gen_check_privilege(dc)) {
-                        gen_icache_hit_test4();
-                    }
-                    break;
-
-                case 3: /*IIUl*/
-                    HAS_OPTION(XTENSA_OPTION_ICACHE_INDEX_LOCK);
-                    if (gen_check_privilege(dc)) {
-                        gen_window_check1(dc, RRI4_S);
-                    }
-                    break;
-
-                default: /*reserved*/
-                    RESERVED();
-                    break;
-                }
-                break;
-
-            case 14: /*IHIc*/
-                HAS_OPTION(XTENSA_OPTION_ICACHE);
-                gen_icache_hit_test8();
-                break;
-
-            case 15: /*IIIc*/
-                HAS_OPTION(XTENSA_OPTION_ICACHE);
-                if (gen_check_privilege(dc)) {
-                    gen_window_check1(dc, RRI8_S);
-                }
-                break;
-
-            default: /*reserved*/
-                RESERVED();
-                break;
-            }
-            break;
-
-#undef gen_icache_hit_test
-#undef gen_icache_hit_test4
-#undef gen_icache_hit_test8
-
-        case 9: /*L16SI*/
-            gen_load_store(ld16s, 1);
-            break;
-#undef gen_load_store
-
-        case 10: /*MOVI*/
-            if (gen_window_check1(dc, RRI8_T)) {
-                tcg_gen_movi_i32(cpu_R[RRI8_T],
-                                 RRI8_IMM8 | (RRI8_S << 8) |
-                                 ((RRI8_S & 0x8) ? 0xfffff000 : 0));
-            }
-            break;
-
-#define gen_load_store_no_hw_align(type) do { \
-            if (gen_window_check2(dc, RRI8_S, RRI8_T)) { \
-                TCGv_i32 addr = tcg_temp_local_new_i32(); \
-                tcg_gen_addi_i32(addr, cpu_R[RRI8_S], RRI8_IMM8 << 2); \
-                gen_load_store_alignment(dc, 2, addr, true); \
-                tcg_gen_qemu_##type(cpu_R[RRI8_T], addr, dc->cring); \
-                tcg_temp_free(addr); \
-            } \
-        } while (0)
-
-        case 11: /*L32AIy*/
-            HAS_OPTION(XTENSA_OPTION_MP_SYNCHRO);
-            gen_load_store_no_hw_align(ld32u); /*TODO acquire?*/
-            break;
-
-        case 12: /*ADDI*/
-            if (gen_window_check2(dc, RRI8_S, RRI8_T)) {
-                tcg_gen_addi_i32(cpu_R[RRI8_T], cpu_R[RRI8_S], RRI8_IMM8_SE);
-            }
-            break;
-
-        case 13: /*ADDMI*/
-            if (gen_window_check2(dc, RRI8_S, RRI8_T)) {
-                tcg_gen_addi_i32(cpu_R[RRI8_T], cpu_R[RRI8_S],
-                                 RRI8_IMM8_SE << 8);
-            }
-            break;
-
-        case 14: /*S32C1Iy*/
-            HAS_OPTION(XTENSA_OPTION_CONDITIONAL_STORE);
-            if (gen_window_check2(dc, RRI8_S, RRI8_T)) {
-                TCGLabel *label = gen_new_label();
-                TCGv_i32 tmp = tcg_temp_local_new_i32();
-                TCGv_i32 addr = tcg_temp_local_new_i32();
-                TCGv_i32 tpc;
-
-                tcg_gen_mov_i32(tmp, cpu_R[RRI8_T]);
-                tcg_gen_addi_i32(addr, cpu_R[RRI8_S], RRI8_IMM8 << 2);
-                gen_load_store_alignment(dc, 2, addr, true);
-
-                tpc = tcg_const_i32(dc->pc);
-                gen_helper_check_atomctl(cpu_env, tpc, addr);
-                tcg_gen_qemu_ld32u(cpu_R[RRI8_T], addr, dc->cring);
-                tcg_gen_brcond_i32(TCG_COND_NE, cpu_R[RRI8_T],
-                        cpu_SR[SCOMPARE1], label);
-
-                tcg_gen_qemu_st32(tmp, addr, dc->cring);
-
-                gen_set_label(label);
-                tcg_temp_free(tpc);
-                tcg_temp_free(addr);
-                tcg_temp_free(tmp);
-            }
-            break;
-
-        case 15: /*S32RIy*/
-            HAS_OPTION(XTENSA_OPTION_MP_SYNCHRO);
-            gen_load_store_no_hw_align(st32); /*TODO release?*/
-            break;
-#undef gen_load_store_no_hw_align
-
-        default: /*reserved*/
-            RESERVED();
-            break;
-        }
-        break;
-
-    case 3: /*LSCIp*/
-        switch (RRI8_R) {
-        case 0: /*LSIf*/
-        case 4: /*SSIf*/
-        case 8: /*LSIUf*/
-        case 12: /*SSIUf*/
-            HAS_OPTION(XTENSA_OPTION_FP_COPROCESSOR);
-            if (gen_window_check1(dc, RRI8_S) &&
-                gen_check_cpenable(dc, 0)) {
-                TCGv_i32 addr = tcg_temp_new_i32();
-                tcg_gen_addi_i32(addr, cpu_R[RRI8_S], RRI8_IMM8 << 2);
-                gen_load_store_alignment(dc, 2, addr, false);
-                if (RRI8_R & 0x4) {
-                    tcg_gen_qemu_st32(cpu_FR[RRI8_T], addr, dc->cring);
-                } else {
-                    tcg_gen_qemu_ld32u(cpu_FR[RRI8_T], addr, dc->cring);
-                }
-                if (RRI8_R & 0x8) {
-                    tcg_gen_mov_i32(cpu_R[RRI8_S], addr);
-                }
-                tcg_temp_free(addr);
-            }
-            break;
-
-        default: /*reserved*/
-            RESERVED();
-            break;
-        }
-        break;
-
-    case 4: /*MAC16d*/
-        HAS_OPTION(XTENSA_OPTION_MAC16);
-        {
-            enum {
-                MAC16_UMUL = 0x0,
-                MAC16_MUL  = 0x4,
-                MAC16_MULA = 0x8,
-                MAC16_MULS = 0xc,
-                MAC16_NONE = 0xf,
-            } op = OP1 & 0xc;
-            bool is_m1_sr = (OP2 & 0x3) == 2;
-            bool is_m2_sr = (OP2 & 0xc) == 0;
-            uint32_t ld_offset = 0;
-
-            if (OP2 > 9) {
-                RESERVED();
-            }
-
-            switch (OP2 & 2) {
-            case 0: /*MACI?/MACC?*/
-                is_m1_sr = true;
-                ld_offset = (OP2 & 1) ? -4 : 4;
-
-                if (OP2 >= 8) { /*MACI/MACC*/
-                    if (OP1 == 0) { /*LDINC/LDDEC*/
-                        op = MAC16_NONE;
-                    } else {
-                        RESERVED();
-                    }
-                } else if (op != MAC16_MULA) { /*MULA.*.*.LDINC/LDDEC*/
-                    RESERVED();
-                }
-                break;
-
-            case 2: /*MACD?/MACA?*/
-                if (op == MAC16_UMUL && OP2 != 7) { /*UMUL only in MACAA*/
-                    RESERVED();
-                }
-                break;
-            }
-
-            if (op != MAC16_NONE) {
-                if (!is_m1_sr && !gen_window_check1(dc, RRR_S)) {
-                    break;
-                }
-                if (!is_m2_sr && !gen_window_check1(dc, RRR_T)) {
-                    break;
-                }
-            }
-
-            if (ld_offset && !gen_window_check1(dc, RRR_S)) {
-                break;
-            }
-
-            {
-                TCGv_i32 vaddr = tcg_temp_new_i32();
-                TCGv_i32 mem32 = tcg_temp_new_i32();
-
-                if (ld_offset) {
-                    tcg_gen_addi_i32(vaddr, cpu_R[RRR_S], ld_offset);
-                    gen_load_store_alignment(dc, 2, vaddr, false);
-                    tcg_gen_qemu_ld32u(mem32, vaddr, dc->cring);
-                }
-                if (op != MAC16_NONE) {
-                    TCGv_i32 m1 = gen_mac16_m(
-                            is_m1_sr ? cpu_SR[MR + RRR_X] : cpu_R[RRR_S],
-                            OP1 & 1, op == MAC16_UMUL);
-                    TCGv_i32 m2 = gen_mac16_m(
-                            is_m2_sr ? cpu_SR[MR + 2 + RRR_Y] : cpu_R[RRR_T],
-                            OP1 & 2, op == MAC16_UMUL);
-
-                    if (op == MAC16_MUL || op == MAC16_UMUL) {
-                        tcg_gen_mul_i32(cpu_SR[ACCLO], m1, m2);
-                        if (op == MAC16_UMUL) {
-                            tcg_gen_movi_i32(cpu_SR[ACCHI], 0);
-                        } else {
-                            tcg_gen_sari_i32(cpu_SR[ACCHI], cpu_SR[ACCLO], 31);
-                        }
-                    } else {
-                        TCGv_i32 lo = tcg_temp_new_i32();
-                        TCGv_i32 hi = tcg_temp_new_i32();
-
-                        tcg_gen_mul_i32(lo, m1, m2);
-                        tcg_gen_sari_i32(hi, lo, 31);
-                        if (op == MAC16_MULA) {
-                            tcg_gen_add2_i32(cpu_SR[ACCLO], cpu_SR[ACCHI],
-                                             cpu_SR[ACCLO], cpu_SR[ACCHI],
-                                             lo, hi);
-                        } else {
-                            tcg_gen_sub2_i32(cpu_SR[ACCLO], cpu_SR[ACCHI],
-                                             cpu_SR[ACCLO], cpu_SR[ACCHI],
-                                             lo, hi);
-                        }
-                        tcg_gen_ext8s_i32(cpu_SR[ACCHI], cpu_SR[ACCHI]);
-
-                        tcg_temp_free_i32(lo);
-                        tcg_temp_free_i32(hi);
-                    }
-                    tcg_temp_free(m1);
-                    tcg_temp_free(m2);
-                }
-                if (ld_offset) {
-                    tcg_gen_mov_i32(cpu_R[RRR_S], vaddr);
-                    tcg_gen_mov_i32(cpu_SR[MR + RRR_W], mem32);
-                }
-                tcg_temp_free(vaddr);
-                tcg_temp_free(mem32);
-            }
-        }
-        break;
-
-    case 5: /*CALLN*/
-        switch (CALL_N) {
-        case 0: /*CALL0*/
-            tcg_gen_movi_i32(cpu_R[0], dc->next_pc);
-            gen_jumpi(dc, (dc->pc & ~3) + (CALL_OFFSET_SE << 2) + 4, 0);
-            break;
-
-        case 1: /*CALL4w*/
-        case 2: /*CALL8w*/
-        case 3: /*CALL12w*/
-            HAS_OPTION(XTENSA_OPTION_WINDOWED_REGISTER);
-            if (gen_window_check1(dc, CALL_N << 2)) {
-                gen_callwi(dc, CALL_N,
-                           (dc->pc & ~3) + (CALL_OFFSET_SE << 2) + 4, 0);
-            }
-            break;
-        }
-        break;
-
-    case 6: /*SI*/
-        switch (CALL_N) {
-        case 0: /*J*/
-            gen_jumpi(dc, dc->pc + 4 + CALL_OFFSET_SE, 0);
-            break;
-
-        case 1: /*BZ*/
-            if (gen_window_check1(dc, BRI12_S)) {
-                static const TCGCond cond[] = {
-                    TCG_COND_EQ, /*BEQZ*/
-                    TCG_COND_NE, /*BNEZ*/
-                    TCG_COND_LT, /*BLTZ*/
-                    TCG_COND_GE, /*BGEZ*/
-                };
-
-                gen_brcondi(dc, cond[BRI12_M & 3], cpu_R[BRI12_S], 0,
-                        4 + BRI12_IMM12_SE);
-            }
-            break;
-
-        case 2: /*BI0*/
-            if (gen_window_check1(dc, BRI8_S)) {
-                static const TCGCond cond[] = {
-                    TCG_COND_EQ, /*BEQI*/
-                    TCG_COND_NE, /*BNEI*/
-                    TCG_COND_LT, /*BLTI*/
-                    TCG_COND_GE, /*BGEI*/
-                };
-
-                gen_brcondi(dc, cond[BRI8_M & 3],
-                        cpu_R[BRI8_S], B4CONST[BRI8_R], 4 + BRI8_IMM8_SE);
-            }
-            break;
-
-        case 3: /*BI1*/
-            switch (BRI8_M) {
-            case 0: /*ENTRYw*/
-                HAS_OPTION(XTENSA_OPTION_WINDOWED_REGISTER);
-                {
-                    TCGv_i32 pc = tcg_const_i32(dc->pc);
-                    TCGv_i32 s = tcg_const_i32(BRI12_S);
-                    TCGv_i32 imm = tcg_const_i32(BRI12_IMM12 << 3);
-                    gen_helper_entry(cpu_env, pc, s, imm);
-                    tcg_temp_free(imm);
-                    tcg_temp_free(s);
-                    tcg_temp_free(pc);
-                    /* This can change tb->flags, so exit tb */
-                    gen_jumpi_check_loop_end(dc, -1);
-                }
-                break;
-
-            case 1: /*B1*/
-                switch (BRI8_R) {
-                case 0: /*BFp*/
-                case 1: /*BTp*/
-                    HAS_OPTION(XTENSA_OPTION_BOOLEAN);
-                    {
-                        TCGv_i32 tmp = tcg_temp_new_i32();
-                        tcg_gen_andi_i32(tmp, cpu_SR[BR], 1 << RRI8_S);
-                        gen_brcondi(dc,
-                                BRI8_R == 1 ? TCG_COND_NE : TCG_COND_EQ,
-                                tmp, 0, 4 + RRI8_IMM8_SE);
-                        tcg_temp_free(tmp);
-                    }
-                    break;
-
-                case 8: /*LOOP*/
-                case 9: /*LOOPNEZ*/
-                case 10: /*LOOPGTZ*/
-                    HAS_OPTION(XTENSA_OPTION_LOOP);
-                    if (gen_window_check1(dc, RRI8_S)) {
-                        uint32_t lend = dc->pc + RRI8_IMM8 + 4;
-                        TCGv_i32 tmp = tcg_const_i32(lend);
-
-                        tcg_gen_subi_i32(cpu_SR[LCOUNT], cpu_R[RRI8_S], 1);
-                        tcg_gen_movi_i32(cpu_SR[LBEG], dc->next_pc);
-                        gen_helper_wsr_lend(cpu_env, tmp);
-                        tcg_temp_free(tmp);
-
-                        if (BRI8_R > 8) {
-                            TCGLabel *label = gen_new_label();
-                            tcg_gen_brcondi_i32(
-                                    BRI8_R == 9 ? TCG_COND_NE : TCG_COND_GT,
-                                    cpu_R[RRI8_S], 0, label);
-                            gen_jumpi(dc, lend, 1);
-                            gen_set_label(label);
-                        }
-
-                        gen_jumpi(dc, dc->next_pc, 0);
-                    }
-                    break;
-
-                default: /*reserved*/
-                    RESERVED();
-                    break;
-
-                }
-                break;
-
-            case 2: /*BLTUI*/
-            case 3: /*BGEUI*/
-                if (gen_window_check1(dc, BRI8_S)) {
-                    gen_brcondi(dc, BRI8_M == 2 ? TCG_COND_LTU : TCG_COND_GEU,
-                                cpu_R[BRI8_S], B4CONSTU[BRI8_R],
-                                4 + BRI8_IMM8_SE);
-                }
-                break;
-            }
-            break;
-
-        }
-        break;
-
-    case 7: /*B*/
-        {
-            TCGCond eq_ne = (RRI8_R & 8) ? TCG_COND_NE : TCG_COND_EQ;
-
-            switch (RRI8_R & 7) {
-            case 0: /*BNONE*/ /*BANY*/
-                if (gen_window_check2(dc, RRI8_S, RRI8_T)) {
-                    TCGv_i32 tmp = tcg_temp_new_i32();
-                    tcg_gen_and_i32(tmp, cpu_R[RRI8_S], cpu_R[RRI8_T]);
-                    gen_brcondi(dc, eq_ne, tmp, 0, 4 + RRI8_IMM8_SE);
-                    tcg_temp_free(tmp);
-                }
-                break;
-
-            case 1: /*BEQ*/ /*BNE*/
-            case 2: /*BLT*/ /*BGE*/
-            case 3: /*BLTU*/ /*BGEU*/
-                if (gen_window_check2(dc, RRI8_S, RRI8_T)) {
-                    static const TCGCond cond[] = {
-                        [1] = TCG_COND_EQ,
-                        [2] = TCG_COND_LT,
-                        [3] = TCG_COND_LTU,
-                        [9] = TCG_COND_NE,
-                        [10] = TCG_COND_GE,
-                        [11] = TCG_COND_GEU,
-                    };
-                    gen_brcond(dc, cond[RRI8_R], cpu_R[RRI8_S], cpu_R[RRI8_T],
-                            4 + RRI8_IMM8_SE);
-                }
-                break;
-
-            case 4: /*BALL*/ /*BNALL*/
-                if (gen_window_check2(dc, RRI8_S, RRI8_T)) {
-                    TCGv_i32 tmp = tcg_temp_new_i32();
-                    tcg_gen_and_i32(tmp, cpu_R[RRI8_S], cpu_R[RRI8_T]);
-                    gen_brcond(dc, eq_ne, tmp, cpu_R[RRI8_T],
-                            4 + RRI8_IMM8_SE);
-                    tcg_temp_free(tmp);
-                }
-                break;
-
-            case 5: /*BBC*/ /*BBS*/
-                if (gen_window_check2(dc, RRI8_S, RRI8_T)) {
-#ifdef TARGET_WORDS_BIGENDIAN
-                    TCGv_i32 bit = tcg_const_i32(0x80000000);
-#else
-                    TCGv_i32 bit = tcg_const_i32(0x00000001);
-#endif
-                    TCGv_i32 tmp = tcg_temp_new_i32();
-                    tcg_gen_andi_i32(tmp, cpu_R[RRI8_T], 0x1f);
-#ifdef TARGET_WORDS_BIGENDIAN
-                    tcg_gen_shr_i32(bit, bit, tmp);
-#else
-                    tcg_gen_shl_i32(bit, bit, tmp);
-#endif
-                    tcg_gen_and_i32(tmp, cpu_R[RRI8_S], bit);
-                    gen_brcondi(dc, eq_ne, tmp, 0, 4 + RRI8_IMM8_SE);
-                    tcg_temp_free(tmp);
-                    tcg_temp_free(bit);
-                }
-                break;
-
-            case 6: /*BBCI*/ /*BBSI*/
-            case 7:
-                if (gen_window_check1(dc, RRI8_S)) {
-                    TCGv_i32 tmp = tcg_temp_new_i32();
-                    tcg_gen_andi_i32(tmp, cpu_R[RRI8_S],
-#ifdef TARGET_WORDS_BIGENDIAN
-                            0x80000000 >> (((RRI8_R & 1) << 4) | RRI8_T));
-#else
-                            0x00000001 << (((RRI8_R & 1) << 4) | RRI8_T));
-#endif
-                    gen_brcondi(dc, eq_ne, tmp, 0, 4 + RRI8_IMM8_SE);
-                    tcg_temp_free(tmp);
-                }
-                break;
-
-            }
-        }
-        break;
-
-#define gen_narrow_load_store(type) do { \
-            if (gen_window_check2(dc, RRRN_S, RRRN_T)) { \
-                TCGv_i32 addr = tcg_temp_new_i32(); \
-                tcg_gen_addi_i32(addr, cpu_R[RRRN_S], RRRN_R << 2); \
-                gen_load_store_alignment(dc, 2, addr, false); \
-                tcg_gen_qemu_##type(cpu_R[RRRN_T], addr, dc->cring); \
-                tcg_temp_free(addr); \
-            } \
-        } while (0)
-
-    case 8: /*L32I.Nn*/
-        gen_narrow_load_store(ld32u);
-        break;
-
-    case 9: /*S32I.Nn*/
-        gen_narrow_load_store(st32);
-        break;
-#undef gen_narrow_load_store
-
-    case 10: /*ADD.Nn*/
-        if (gen_window_check3(dc, RRRN_R, RRRN_S, RRRN_T)) {
-            tcg_gen_add_i32(cpu_R[RRRN_R], cpu_R[RRRN_S], cpu_R[RRRN_T]);
-        }
-        break;
-
-    case 11: /*ADDI.Nn*/
-        if (gen_window_check2(dc, RRRN_R, RRRN_S)) {
-            tcg_gen_addi_i32(cpu_R[RRRN_R], cpu_R[RRRN_S],
-                             RRRN_T ? RRRN_T : -1);
-        }
-        break;
-
-    case 12: /*ST2n*/
-        if (!gen_window_check1(dc, RRRN_S)) {
-            break;
-        }
-        if (RRRN_T < 8) { /*MOVI.Nn*/
-            tcg_gen_movi_i32(cpu_R[RRRN_S],
-                    RRRN_R | (RRRN_T << 4) |
-                    ((RRRN_T & 6) == 6 ? 0xffffff80 : 0));
-        } else { /*BEQZ.Nn*/ /*BNEZ.Nn*/
-            TCGCond eq_ne = (RRRN_T & 4) ? TCG_COND_NE : TCG_COND_EQ;
-
-            gen_brcondi(dc, eq_ne, cpu_R[RRRN_S], 0,
-                    4 + (RRRN_R | ((RRRN_T & 3) << 4)));
-        }
-        break;
-
-    case 13: /*ST3n*/
-        switch (RRRN_R) {
-        case 0: /*MOV.Nn*/
-            if (gen_window_check2(dc, RRRN_S, RRRN_T)) {
-                tcg_gen_mov_i32(cpu_R[RRRN_T], cpu_R[RRRN_S]);
-            }
-            break;
-
-        case 15: /*S3*/
-            switch (RRRN_T) {
-            case 0: /*RET.Nn*/
-                gen_jump(dc, cpu_R[0]);
-                break;
-
-            case 1: /*RETW.Nn*/
-                HAS_OPTION(XTENSA_OPTION_WINDOWED_REGISTER);
-                {
-                    TCGv_i32 tmp = tcg_const_i32(dc->pc);
-                    gen_helper_retw(tmp, cpu_env, tmp);
-                    gen_jump(dc, tmp);
-                    tcg_temp_free(tmp);
-                }
-                break;
-
-            case 2: /*BREAK.Nn*/
-                HAS_OPTION(XTENSA_OPTION_DEBUG);
-                if (dc->debug) {
-                    gen_debug_exception(dc, DEBUGCAUSE_BN);
-                }
-                break;
-
-            case 3: /*NOP.Nn*/
-                break;
-
-            case 6: /*ILL.Nn*/
-                gen_exception_cause(dc, ILLEGAL_INSTRUCTION_CAUSE);
-                break;
-
-            default: /*reserved*/
-                RESERVED();
-                break;
-            }
-            break;
-
-        default: /*reserved*/
-            RESERVED();
-            break;
-        }
-        break;
-
-    default: /*reserved*/
-        RESERVED();
-        break;
+    for (i = 1; i < len; ++i) {
+        b[i] = cpu_ldub_code(env, dc->pc + i);
     }
+    xtensa_insnbuf_from_chars(isa, dc->insnbuf, b, len);
+    fmt = xtensa_format_decode(isa, dc->insnbuf);
+    slots = xtensa_format_num_slots(isa, fmt);
+//        fprintf(stderr, slots > 1 ? "0x%08x : { " : "0x%08x : ", dc->pc);
+    for (slot = 0; slot < slots; ++slot) {
+        xtensa_opcode opc;
+        unsigned opnd, vopnd, opnds;
+        uint32_t raw_arg[16];
+        uint32_t arg[16];
+        XtensaOpcodeMap *map;
+
+        dc->raw_arg = raw_arg;
+
+        xtensa_format_get_slot(isa, fmt, slot, dc->insnbuf, dc->slotbuf);
+        opc = xtensa_opcode_decode(isa, fmt, slot, dc->slotbuf);
+        opnds = xtensa_opcode_num_operands(isa, opc);
+
+//            fprintf(stderr, "%s%s", slot ? "; " : "",
+//                    xtensa_opcode_name(isa, opc));
+        for (opnd = vopnd = 0; opnd < opnds; ++opnd) {
+            if (xtensa_operand_is_visible(isa, opc, opnd)) {
+                uint32_t v;
+
+//                    fprintf(stderr, vopnd ? ", " : "\t");
+                xtensa_operand_get_field(isa, opc, opnd, fmt, slot,
+                                         dc->slotbuf, &v);
+                xtensa_operand_decode(isa, opc, opnd, &v);
+                raw_arg[vopnd] = v;
+                if (xtensa_operand_is_register(isa, opc, opnd)) {
+                    xtensa_regfile rf = xtensa_operand_regfile(isa, opc, opnd);
+//                        fprintf(stderr, "%s%d", xtensa_regfile_shortname(isa, rf), v);
+                } else {
+                    if (xtensa_operand_is_PCrelative(isa, opc, opnd)) {
+                        xtensa_operand_undo_reloc(isa, opc, opnd, &v, dc->pc);
+//                            fprintf(stderr, "0x%x", v);
+                    } else {
+//                            fprintf(stderr, "%d", v);
+                    }
+                }
+                arg[vopnd] = v;
+                ++vopnd;
+            }
+        }
+        map = dc->config->opcode_map[opc];
+        if (map) {
+            map->translator(dc, arg, map->par);
+        } else {
+//                fprintf(stderr, " -- old\n");
+        }
+    }
+//        fprintf(stderr, slots > 1 ? " }\n" : "\n");
 
     if (dc->is_jmp == DISAS_NEXT) {
         gen_check_loop_end(dc, 0);
@@ -3095,13 +1007,12 @@ static void disas_xtensa_insn(CPUXtensaState *env, DisasContext *dc)
 invalid_opcode:
     qemu_log_mask(LOG_GUEST_ERROR, "INVALID(pc = %08x)\n", dc->pc);
     gen_exception_cause(dc, ILLEGAL_INSTRUCTION_CAUSE);
-#undef HAS_OPTION
 }
 
 static inline unsigned xtensa_insn_len(CPUXtensaState *env, DisasContext *dc)
 {
     uint8_t b0 = cpu_ldub_code(env, dc->pc);
-    return xtensa_op0_insn_len(OP0);
+    return xtensa_op0_insn_len(dc, b0);
 }
 
 static void gen_ibreak_check(CPUXtensaState *env, DisasContext *dc)
@@ -3150,6 +1061,11 @@ void gen_intermediate_code(CPUXtensaState *env, TranslationBlock *tb)
         XTENSA_TBFLAG_CPENABLE_SHIFT;
     dc.window = ((tb->flags & XTENSA_TBFLAG_WINDOW_MASK) >>
                  XTENSA_TBFLAG_WINDOW_SHIFT);
+
+    if (dc.config->isa) {
+        dc.insnbuf = xtensa_insnbuf_alloc(dc.config->isa);
+        dc.slotbuf = xtensa_insnbuf_alloc(dc.config->isa);
+    }
 
     init_litbase(&dc);
     init_sar_tracker(&dc);
@@ -3231,6 +1147,10 @@ done:
     if (dc.icount) {
         tcg_temp_free(dc.next_icount);
     }
+    if (dc.config->isa) {
+        xtensa_insnbuf_free(dc.config->isa, dc.insnbuf);
+        xtensa_insnbuf_free(dc.config->isa, dc.slotbuf);
+    }
 
     if (tb->cflags & CF_LAST_IO) {
         gen_io_end();
@@ -3311,4 +1231,1584 @@ void restore_state_to_opc(CPUXtensaState *env, TranslationBlock *tb,
                           target_ulong *data)
 {
     env->pc = data[0];
+}
+
+static void translate_abs(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        TCGv_i32 zero = tcg_const_i32(0);
+        TCGv_i32 neg = tcg_temp_new_i32();
+
+        tcg_gen_neg_i32(neg, cpu_R[arg[1]]);
+        tcg_gen_movcond_i32(TCG_COND_GE, cpu_R[arg[0]],
+                            cpu_R[arg[1]], zero, cpu_R[arg[1]], neg);
+        tcg_temp_free(neg);
+        tcg_temp_free(zero);
+    }
+}
+
+static void translate_add(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check3(dc, arg[0], arg[1], arg[2])) {
+        tcg_gen_add_i32(cpu_R[arg[0]], cpu_R[arg[1]], cpu_R[arg[2]]);
+    }
+}
+
+static void translate_addi(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        tcg_gen_addi_i32(cpu_R[arg[0]], cpu_R[arg[1]], arg[2]);
+    }
+}
+
+static void translate_addx(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check3(dc, arg[0], arg[1], arg[2])) {
+        TCGv_i32 tmp = tcg_temp_new_i32();
+        tcg_gen_shli_i32(tmp, cpu_R[arg[1]], par[0]);
+        tcg_gen_add_i32(cpu_R[arg[0]], tmp, cpu_R[arg[2]]);
+        tcg_temp_free(tmp);
+    }
+}
+
+static void translate_all(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    uint32_t shift = par[1];
+    TCGv_i32 mask = tcg_const_i32(((1 << shift) - 1) << arg[1]);
+    TCGv_i32 tmp = tcg_temp_new_i32();
+
+    tcg_gen_and_i32(tmp, cpu_SR[BR], mask);
+    if (par[0]) {
+        tcg_gen_addi_i32(tmp, tmp, 1 << arg[1]);
+    } else {
+        tcg_gen_add_i32(tmp, tmp, mask);
+    }
+    tcg_gen_shri_i32(tmp, tmp, arg[1] + shift);
+    tcg_gen_deposit_i32(cpu_SR[BR], cpu_SR[BR],
+                        tmp, arg[0], 1);
+    tcg_temp_free(mask);
+    tcg_temp_free(tmp);
+}
+
+static void translate_and(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check3(dc, arg[0], arg[1], arg[2])) {
+        tcg_gen_and_i32(cpu_R[arg[0]], cpu_R[arg[1]], cpu_R[arg[2]]);
+    }
+}
+
+static void translate_ball(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        TCGv_i32 tmp = tcg_temp_new_i32();
+        tcg_gen_and_i32(tmp, cpu_R[arg[0]], cpu_R[arg[1]]);
+        gen_brcond(dc, par[0], tmp, cpu_R[arg[1]], arg[2]);
+        tcg_temp_free(tmp);
+    }
+}
+
+static void translate_bany(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        TCGv_i32 tmp = tcg_temp_new_i32();
+        tcg_gen_and_i32(tmp, cpu_R[arg[0]], cpu_R[arg[1]]);
+        gen_brcondi(dc, par[0], tmp, 0, arg[2]);
+        tcg_temp_free(tmp);
+    }
+}
+
+static void translate_b(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        gen_brcond(dc, par[0], cpu_R[arg[0]], cpu_R[arg[1]], arg[2]);
+    }
+}
+
+static void translate_bb(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+#ifdef TARGET_WORDS_BIGENDIAN
+        TCGv_i32 bit = tcg_const_i32(0x80000000u);
+#else
+        TCGv_i32 bit = tcg_const_i32(0x00000001u);
+#endif
+        TCGv_i32 tmp = tcg_temp_new_i32();
+        tcg_gen_andi_i32(tmp, cpu_R[arg[1]], 0x1f);
+#ifdef TARGET_WORDS_BIGENDIAN
+        tcg_gen_shr_i32(bit, bit, tmp);
+#else
+        tcg_gen_shl_i32(bit, bit, tmp);
+#endif
+        tcg_gen_and_i32(tmp, cpu_R[arg[0]], bit);
+        gen_brcondi(dc, par[0], tmp, 0, arg[2]);
+        tcg_temp_free(tmp);
+        tcg_temp_free(bit);
+    }
+}
+
+static void translate_bbi(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, arg[0])) {
+        TCGv_i32 tmp = tcg_temp_new_i32();
+#ifdef TARGET_WORDS_BIGENDIAN
+        tcg_gen_andi_i32(tmp, cpu_R[arg[0]], 0x80000000u >> arg[1]);
+#else
+        tcg_gen_andi_i32(tmp, cpu_R[arg[0]], 0x00000001u << arg[1]);
+#endif
+        gen_brcondi(dc, par[0], tmp, 0, arg[2]);
+        tcg_temp_free(tmp);
+    }
+}
+
+static void translate_bi(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, arg[0])) {
+        gen_brcondi(dc, par[0], cpu_R[arg[0]], arg[1], arg[2]);
+    }
+}
+
+static void translate_bz(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, arg[0])) {
+        gen_brcondi(dc, par[0], cpu_R[arg[0]], 0, arg[1]);
+    }
+}
+
+static void translate_break(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (dc->debug) {
+        gen_debug_exception(dc, par[0]);
+    }
+}
+
+static void translate_call0(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    tcg_gen_movi_i32(cpu_R[0], dc->next_pc);
+    gen_jumpi(dc, arg[0], 0);
+}
+
+static void translate_callw(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, par[0] << 2)) {
+        gen_callwi(dc, par[0], arg[0], 0);
+    }
+}
+
+static void translate_callx0(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, arg[0])) {
+        TCGv_i32 tmp = tcg_temp_new_i32();
+        tcg_gen_mov_i32(tmp, cpu_R[arg[0]]);
+        tcg_gen_movi_i32(cpu_R[0], dc->next_pc);
+        gen_jump(dc, tmp);
+        tcg_temp_free(tmp);
+    }
+}
+
+static void translate_callxw(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], par[0] << 2)) {
+        TCGv_i32 tmp = tcg_temp_new_i32();
+
+        tcg_gen_mov_i32(tmp, cpu_R[arg[0]]);
+        gen_callw(dc, par[0], tmp);
+        tcg_temp_free(tmp);
+    }
+}
+
+static void translate_clamps(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        TCGv_i32 tmp1 = tcg_const_i32(-1u << arg[2]);
+        TCGv_i32 tmp2 = tcg_const_i32((1 << arg[2]) - 1);
+
+        tcg_gen_movcond_i32(TCG_COND_GT, tmp1,
+                            cpu_R[arg[1]], tmp1, cpu_R[arg[1]], tmp1);
+        tcg_gen_movcond_i32(TCG_COND_LT, cpu_R[arg[0]],
+                            tmp1, tmp2, tmp1, tmp2);
+        tcg_temp_free(tmp1);
+        tcg_temp_free(tmp2);
+    }
+}
+
+/* par[0]: privileged, par[1]: check memory access */
+static void translate_dcache(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if ((!par[0] || gen_check_privilege(dc)) &&
+        gen_window_check1(dc, arg[0]) && par[1]) {
+        TCGv_i32 addr = tcg_temp_new_i32();
+        TCGv_i32 res = tcg_temp_new_i32();
+
+        tcg_gen_addi_i32(addr, cpu_R[arg[0]], arg[1]);
+        tcg_gen_qemu_ld8u(res, addr, dc->cring);
+        tcg_temp_free(addr);
+        tcg_temp_free(res);
+    }
+}
+
+static void translate_depbits(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        tcg_gen_deposit_i32(cpu_R[arg[1]], cpu_R[arg[1]], cpu_R[arg[0]],
+                            arg[2], arg[3]);
+    }
+}
+
+static void translate_entry(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    TCGv_i32 pc = tcg_const_i32(dc->pc);
+    TCGv_i32 s = tcg_const_i32(arg[0]);
+    TCGv_i32 imm = tcg_const_i32(arg[1]);
+    gen_helper_entry(cpu_env, pc, s, imm);
+    tcg_temp_free(imm);
+    tcg_temp_free(s);
+    tcg_temp_free(pc);
+    /* This can change tb->flags, so exit tb */
+    gen_jumpi_check_loop_end(dc, -1);
+}
+
+static void translate_extui(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        int maskimm = (1 << arg[3]) - 1;
+
+        TCGv_i32 tmp = tcg_temp_new_i32();
+        tcg_gen_shri_i32(tmp, cpu_R[arg[1]], arg[2]);
+        tcg_gen_andi_i32(cpu_R[arg[0]], tmp, maskimm);
+        tcg_temp_free(tmp);
+    }
+}
+
+/* par[0]: privileged, par[1]: check memory access */
+static void translate_icache(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if ((!par[0] || gen_check_privilege(dc)) &&
+        gen_window_check1(dc, arg[0]) && par[1]) {
+        TCGv_i32 addr = tcg_temp_new_i32();
+
+        tcg_gen_movi_i32(cpu_pc, dc->pc);
+        tcg_gen_addi_i32(addr, cpu_R[arg[0]], arg[1]);
+        gen_helper_itlb_hit_test(cpu_env, addr);
+        tcg_temp_free(addr);
+    }
+}
+
+static void translate_itlb(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_privilege(dc) &&
+        gen_window_check1(dc, arg[0])) {
+        TCGv_i32 dtlb = tcg_const_i32(par[0]);
+
+        gen_helper_itlb(cpu_env, cpu_R[arg[0]], dtlb);
+        /* This could change memory mapping, so exit tb */
+        gen_jumpi_check_loop_end(dc, -1);
+        tcg_temp_free(dtlb);
+    }
+}
+
+static void translate_ill(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    gen_exception_cause(dc, ILLEGAL_INSTRUCTION_CAUSE);
+}
+
+static void translate_j(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    gen_jumpi(dc, arg[0], 0);
+}
+
+static void translate_jx(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, arg[0])) {
+        gen_jump(dc, cpu_R[arg[0]]);
+    }
+}
+
+static void translate_l32e(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_privilege(dc) &&
+        gen_window_check2(dc, arg[0], arg[1])) {
+        TCGv_i32 addr = tcg_temp_new_i32();
+
+        tcg_gen_addi_i32(addr, cpu_R[arg[1]], arg[2]);
+        gen_load_store_alignment(dc, 2, addr, false);
+        tcg_gen_qemu_ld_tl(cpu_R[arg[0]], addr, dc->ring, MO_TEUL);
+        tcg_temp_free(addr);
+    }
+}
+
+static void translate_ldst(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        TCGv_i32 addr = tcg_temp_new_i32();
+
+        tcg_gen_addi_i32(addr, cpu_R[arg[1]], arg[2]);
+        if (par[0] & MO_SIZE) {
+            gen_load_store_alignment(dc, par[0] & MO_SIZE, addr, par[1]);
+        }
+        if (par[2]) {
+            tcg_gen_qemu_st_tl(cpu_R[arg[0]], addr, dc->cring, par[0]);
+        } else {
+            tcg_gen_qemu_ld_tl(cpu_R[arg[0]], addr, dc->cring, par[0]);
+        }
+        tcg_temp_free(addr);
+    }
+}
+
+static void translate_l32r(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, arg[0])) {
+        TCGv_i32 tmp = (dc->tb->flags & XTENSA_TBFLAG_LITBASE) ?
+                       tcg_const_i32(dc->raw_arg[1] - 1) :
+                       tcg_const_i32(arg[1]);
+
+        if (dc->tb->flags & XTENSA_TBFLAG_LITBASE) {
+            tcg_gen_add_i32(tmp, tmp, dc->litbase);
+        }
+        tcg_gen_qemu_ld32u(cpu_R[arg[0]], tmp, dc->cring);
+        tcg_temp_free(tmp);
+    }
+}
+
+static void translate_loop(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, arg[0])) {
+        uint32_t lend = arg[1];
+        TCGv_i32 tmp = tcg_const_i32(lend);
+
+        tcg_gen_subi_i32(cpu_SR[LCOUNT], cpu_R[arg[0]], 1);
+        tcg_gen_movi_i32(cpu_SR[LBEG], dc->next_pc);
+        gen_helper_wsr_lend(cpu_env, tmp);
+        tcg_temp_free(tmp);
+
+        if (par[0] != TCG_COND_NEVER) {
+            TCGLabel *label = gen_new_label();
+            tcg_gen_brcondi_i32(par[0], cpu_R[arg[0]], 0, label);
+            gen_jumpi(dc, lend, 1);
+            gen_set_label(label);
+        }
+
+        gen_jumpi(dc, dc->next_pc, 0);
+    }
+}
+
+enum {
+    MAC16_UMUL,
+    MAC16_MUL,
+    MAC16_MULA,
+    MAC16_MULS,
+    MAC16_NONE,
+};
+
+enum {
+    MAC16_LL,
+    MAC16_HL,
+    MAC16_LH,
+    MAC16_HH,
+
+    MAC16_HX = 0x1,
+    MAC16_XH = 0x2,
+};
+
+enum {
+    MAC16_AA,
+    MAC16_AD,
+    MAC16_DA,
+    MAC16_DD,
+
+    MAC16_XD = 0x1,
+    MAC16_DX = 0x2,
+};
+
+static void translate_mac16(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    int op = par[0];
+    bool is_m1_sr = par[1] & MAC16_DX;
+    bool is_m2_sr = par[1] & MAC16_XD;
+    unsigned half = par[2];
+    uint32_t ld_offset = par[3];
+    unsigned off = ld_offset ? 2 : 0;
+    uint32_t ar[3] = {0};
+    unsigned n_ar = 0;
+
+    if (op != MAC16_NONE) {
+        if (!is_m1_sr) {
+            ar[n_ar++] = arg[off];
+        }
+        if (!is_m2_sr) {
+            ar[n_ar++] = arg[off + 1];
+        }
+    }
+
+    if (ld_offset) {
+        ar[n_ar++] = arg[1];
+    }
+
+    if (gen_window_check3(dc, ar[0], ar[1], ar[2])) {
+        TCGv_i32 vaddr = tcg_temp_new_i32();
+        TCGv_i32 mem32 = tcg_temp_new_i32();
+
+        if (ld_offset) {
+            tcg_gen_addi_i32(vaddr, cpu_R[arg[1]], ld_offset);
+            gen_load_store_alignment(dc, 2, vaddr, false);
+            tcg_gen_qemu_ld32u(mem32, vaddr, dc->cring);
+        }
+        if (op != MAC16_NONE) {
+            TCGv_i32 m1 = gen_mac16_m(is_m1_sr ?
+                                      cpu_SR[MR + arg[off]] :
+                                      cpu_R[arg[off]],
+                                      half & MAC16_HX, op == MAC16_UMUL);
+            TCGv_i32 m2 = gen_mac16_m(is_m2_sr ?
+                                      cpu_SR[MR + arg[off + 1]] :
+                                      cpu_R[arg[off + 1]],
+                                      half & MAC16_XH, op == MAC16_UMUL);
+
+            if (op == MAC16_MUL || op == MAC16_UMUL) {
+                tcg_gen_mul_i32(cpu_SR[ACCLO], m1, m2);
+                if (op == MAC16_UMUL) {
+                    tcg_gen_movi_i32(cpu_SR[ACCHI], 0);
+                } else {
+                    tcg_gen_sari_i32(cpu_SR[ACCHI], cpu_SR[ACCLO], 31);
+                }
+            } else {
+                TCGv_i32 lo = tcg_temp_new_i32();
+                TCGv_i32 hi = tcg_temp_new_i32();
+
+                tcg_gen_mul_i32(lo, m1, m2);
+                tcg_gen_sari_i32(hi, lo, 31);
+                if (op == MAC16_MULA) {
+                    tcg_gen_add2_i32(cpu_SR[ACCLO], cpu_SR[ACCHI],
+                                     cpu_SR[ACCLO], cpu_SR[ACCHI],
+                                     lo, hi);
+                } else {
+                    tcg_gen_sub2_i32(cpu_SR[ACCLO], cpu_SR[ACCHI],
+                                     cpu_SR[ACCLO], cpu_SR[ACCHI],
+                                     lo, hi);
+                }
+                tcg_gen_ext8s_i32(cpu_SR[ACCHI], cpu_SR[ACCHI]);
+
+                tcg_temp_free_i32(lo);
+                tcg_temp_free_i32(hi);
+            }
+            tcg_temp_free(m1);
+            tcg_temp_free(m2);
+        }
+        if (ld_offset) {
+            tcg_gen_mov_i32(cpu_R[arg[1]], vaddr);
+            tcg_gen_mov_i32(cpu_SR[MR + arg[0]], mem32);
+        }
+        tcg_temp_free(vaddr);
+        tcg_temp_free(mem32);
+    }
+}
+
+static void translate_minmax(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check3(dc, arg[0], arg[1], arg[2])) {
+        tcg_gen_movcond_i32(par[0], cpu_R[arg[0]],
+                            cpu_R[arg[1]], cpu_R[arg[2]],
+                            cpu_R[arg[1]], cpu_R[arg[2]]);
+    }
+}
+
+static void translate_mov(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        tcg_gen_mov_i32(cpu_R[arg[0]], cpu_R[arg[1]]);
+    }
+}
+
+static void translate_movcond(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check3(dc, arg[0], arg[1], arg[2])) {
+        TCGv_i32 zero = tcg_const_i32(0);
+
+        tcg_gen_movcond_i32(par[0], cpu_R[arg[0]],
+                            cpu_R[arg[2]], zero, cpu_R[arg[1]], cpu_R[arg[0]]);
+        tcg_temp_free(zero);
+    }
+}
+
+static void translate_movi(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, arg[0])) {
+        tcg_gen_movi_i32(cpu_R[arg[0]], arg[1]);
+    }
+}
+
+static void translate_movsp(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        TCGv_i32 pc = tcg_const_i32(dc->pc);
+        gen_helper_movsp(cpu_env, pc);
+        tcg_gen_mov_i32(cpu_R[arg[0]], cpu_R[arg[1]]);
+        tcg_temp_free(pc);
+    }
+}
+
+static void translate_mul16(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check3(dc, arg[0], arg[1], arg[2])) {
+        TCGv_i32 v1 = tcg_temp_new_i32();
+        TCGv_i32 v2 = tcg_temp_new_i32();
+
+        if (par[0]) {
+            tcg_gen_ext16s_i32(v1, cpu_R[arg[1]]);
+            tcg_gen_ext16s_i32(v2, cpu_R[arg[2]]);
+        } else {
+            tcg_gen_ext16u_i32(v1, cpu_R[arg[1]]);
+            tcg_gen_ext16u_i32(v2, cpu_R[arg[2]]);
+        }
+        tcg_gen_mul_i32(cpu_R[arg[0]], v1, v2);
+        tcg_temp_free(v2);
+        tcg_temp_free(v1);
+    }
+}
+
+static void translate_mull(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check3(dc, arg[0], arg[1], arg[2])) {
+        tcg_gen_mul_i32(cpu_R[arg[0]], cpu_R[arg[1]], cpu_R[arg[2]]);
+    }
+}
+
+static void translate_mulh(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check3(dc, arg[0], arg[1], arg[2])) {
+        TCGv_i32 lo = tcg_temp_new();
+
+        if (par[0]) {
+            tcg_gen_muls2_i32(lo, cpu_R[arg[0]], cpu_R[arg[1]], cpu_R[arg[2]]);
+        } else {
+            tcg_gen_mulu2_i32(lo, cpu_R[arg[0]], cpu_R[arg[1]], cpu_R[arg[2]]);
+        }
+        tcg_temp_free(lo);
+    }
+}
+
+static void translate_neg(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        tcg_gen_neg_i32(cpu_R[arg[0]], cpu_R[arg[1]]);
+    }
+}
+
+static void translate_nop(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+}
+
+static void translate_nsa(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        tcg_gen_clrsb_i32(cpu_R[arg[0]], cpu_R[arg[1]]);
+    }
+}
+
+static void translate_nsau(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        tcg_gen_clzi_i32(cpu_R[arg[0]], cpu_R[arg[1]], 32);
+    }
+}
+
+static void translate_or(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check3(dc, arg[0], arg[1], arg[2])) {
+        tcg_gen_or_i32(cpu_R[arg[0]], cpu_R[arg[1]], cpu_R[arg[2]]);
+    }
+}
+
+static void translate_ptlb(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_privilege(dc) &&
+        gen_window_check2(dc, arg[0], arg[1])) {
+        TCGv_i32 dtlb = tcg_const_i32(par[0]);
+
+        tcg_gen_movi_i32(cpu_pc, dc->pc);
+        gen_helper_ptlb(cpu_R[arg[0]], cpu_env, cpu_R[arg[1]], dtlb);
+        tcg_temp_free(dtlb);
+    }
+}
+
+static void gen_zero_check(DisasContext *dc, uint32_t arg[])
+{
+    TCGLabel *label = gen_new_label();
+
+    tcg_gen_brcondi_i32(TCG_COND_NE, cpu_R[arg[2]], 0, label);
+    gen_exception_cause(dc, INTEGER_DIVIDE_BY_ZERO_CAUSE);
+    gen_set_label(label);
+}
+
+static void translate_quos(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check3(dc, arg[0], arg[1], arg[2])) {
+        TCGLabel *label1 = gen_new_label();
+        TCGLabel *label2 = gen_new_label();
+
+        gen_zero_check(dc, arg);
+
+        tcg_gen_brcondi_i32(TCG_COND_NE, cpu_R[arg[1]], 0x80000000,
+                            label1);
+        tcg_gen_brcondi_i32(TCG_COND_NE, cpu_R[arg[2]], 0xffffffff,
+                            label1);
+        tcg_gen_movi_i32(cpu_R[arg[0]],
+                         par[0] ? 0x80000000 : 0);
+        tcg_gen_br(label2);
+        gen_set_label(label1);
+        if (par[0]) {
+            tcg_gen_div_i32(cpu_R[arg[0]],
+                            cpu_R[arg[1]], cpu_R[arg[2]]);
+        } else {
+            tcg_gen_rem_i32(cpu_R[arg[0]],
+                            cpu_R[arg[1]], cpu_R[arg[2]]);
+        }
+        gen_set_label(label2);
+    }
+}
+
+static void translate_quou(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check3(dc, arg[0], arg[1], arg[2])) {
+        gen_zero_check(dc, arg);
+        if (par[0]) {
+            tcg_gen_divu_i32(cpu_R[arg[0]],
+                             cpu_R[arg[1]], cpu_R[arg[2]]);
+        } else {
+            tcg_gen_remu_i32(cpu_R[arg[0]],
+                             cpu_R[arg[1]], cpu_R[arg[2]]);
+        }
+    }
+}
+
+static void translate_rer(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_privilege(dc) &&
+        gen_window_check2(dc, arg[0], arg[1])) {
+        gen_helper_rer(cpu_R[arg[0]], cpu_env, cpu_R[arg[1]]);
+    }
+}
+
+static void translate_ret(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    gen_jump(dc, cpu_R[0]);
+}
+
+static void translate_retw(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    TCGv_i32 tmp = tcg_const_i32(dc->pc);
+    gen_helper_retw(tmp, cpu_env, tmp);
+    gen_jump(dc, tmp);
+    tcg_temp_free(tmp);
+}
+
+static void translate_rfde(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_privilege(dc)) {
+        gen_jump(dc, cpu_SR[dc->config->ndepc ? DEPC : EPC1]);
+    }
+}
+
+static void translate_rfe(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_privilege(dc)) {
+        tcg_gen_andi_i32(cpu_SR[PS], cpu_SR[PS], ~PS_EXCM);
+        gen_check_interrupts(dc);
+        gen_jump(dc, cpu_SR[EPC1]);
+    }
+}
+
+static void translate_rfi(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_privilege(dc)) {
+        tcg_gen_mov_i32(cpu_SR[PS], cpu_SR[EPS2 + arg[0] - 2]);
+        gen_check_interrupts(dc);
+        gen_jump(dc, cpu_SR[EPC1 + arg[0] - 1]);
+    }
+}
+
+static void translate_rfw(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_privilege(dc)) {
+        TCGv_i32 tmp = tcg_const_i32(1);
+
+        tcg_gen_andi_i32(cpu_SR[PS], cpu_SR[PS], ~PS_EXCM);
+        tcg_gen_shl_i32(tmp, tmp, cpu_SR[WINDOW_BASE]);
+
+        if (par[0]) {
+            tcg_gen_andc_i32(cpu_SR[WINDOW_START],
+                             cpu_SR[WINDOW_START], tmp);
+        } else {
+            tcg_gen_or_i32(cpu_SR[WINDOW_START],
+                           cpu_SR[WINDOW_START], tmp);
+        }
+
+        gen_helper_restore_owb(cpu_env);
+        gen_check_interrupts(dc);
+        gen_jump(dc, cpu_SR[EPC1]);
+
+        tcg_temp_free(tmp);
+    }
+}
+
+static void translate_rotw(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_privilege(dc)) {
+        TCGv_i32 tmp = tcg_const_i32(arg[0]);
+        gen_helper_rotw(cpu_env, tmp);
+        tcg_temp_free(tmp);
+        /* This can change tb->flags, so exit tb */
+        gen_jumpi_check_loop_end(dc, -1);
+    }
+}
+
+static void translate_rsil(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_privilege(dc) &&
+        gen_window_check1(dc, arg[0])) {
+        tcg_gen_mov_i32(cpu_R[arg[0]], cpu_SR[PS]);
+        tcg_gen_andi_i32(cpu_SR[PS], cpu_SR[PS], ~PS_INTLEVEL);
+        tcg_gen_ori_i32(cpu_SR[PS], cpu_SR[PS], arg[1]);
+        gen_check_interrupts(dc);
+        gen_jumpi_check_loop_end(dc, 0);
+    }
+}
+
+static void translate_rsr(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if ((par[0] < 64 || gen_check_privilege(dc)) &&
+       gen_window_check1(dc, arg[0])) {
+        if (gen_rsr(dc, cpu_R[arg[0]], par[0])) {
+            gen_jumpi_check_loop_end(dc, 0);
+        }
+    }
+}
+
+static void translate_rtlb(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    static void (* const helper[])(TCGv_i32 r, TCGv_env env, TCGv_i32 a1,
+                                   TCGv_i32 a2) = {
+        gen_helper_rtlb0,
+        gen_helper_rtlb1,
+    };
+
+    if (gen_check_privilege(dc) &&
+        gen_window_check2(dc, arg[0], arg[1])) {
+        TCGv_i32 dtlb = tcg_const_i32(par[0]);
+
+        helper[par[1]](cpu_R[arg[0]], cpu_env, cpu_R[arg[1]], dtlb);
+        tcg_temp_free(dtlb);
+    }
+}
+
+static void translate_rur(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, arg[0])) {
+        if (uregnames[par[0]].name) {
+            tcg_gen_mov_i32(cpu_R[arg[0]], cpu_UR[par[0]]);
+        } else {
+            qemu_log_mask(LOG_UNIMP, "RUR %d not implemented, ", par[0]);
+        }
+    }
+}
+
+static void translate_s32c1i(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        TCGLabel *label = gen_new_label();
+        TCGv_i32 tmp = tcg_temp_local_new_i32();
+        TCGv_i32 addr = tcg_temp_local_new_i32();
+        TCGv_i32 tpc;
+
+        tcg_gen_mov_i32(tmp, cpu_R[arg[0]]);
+        tcg_gen_addi_i32(addr, cpu_R[arg[1]], arg[2]);
+        gen_load_store_alignment(dc, 2, addr, true);
+
+        tpc = tcg_const_i32(dc->pc);
+        gen_helper_check_atomctl(cpu_env, tpc, addr);
+        tcg_gen_qemu_ld32u(cpu_R[arg[0]], addr, dc->cring);
+        tcg_gen_brcond_i32(TCG_COND_NE, cpu_R[arg[0]],
+                           cpu_SR[SCOMPARE1], label);
+
+        tcg_gen_qemu_st32(tmp, addr, dc->cring);
+
+        gen_set_label(label);
+        tcg_temp_free(tpc);
+        tcg_temp_free(addr);
+        tcg_temp_free(tmp);
+    }
+}
+
+static void translate_s32e(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_privilege(dc) &&
+        gen_window_check2(dc, arg[0], arg[1])) {
+        TCGv_i32 addr = tcg_temp_new_i32();
+
+        tcg_gen_addi_i32(addr, cpu_R[arg[1]], arg[2]);
+        gen_load_store_alignment(dc, 2, addr, false);
+        tcg_gen_qemu_st_tl(cpu_R[arg[0]], addr, dc->ring, MO_TEUL);
+        tcg_temp_free(addr);
+    }
+}
+
+static void translate_sext(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        int shift = 31 - arg[2];
+
+        if (shift == 24) {
+            tcg_gen_ext8s_i32(cpu_R[arg[0]], cpu_R[arg[1]]);
+        } else if (shift == 16) {
+            tcg_gen_ext16s_i32(cpu_R[arg[0]], cpu_R[arg[1]]);
+        } else {
+            TCGv_i32 tmp = tcg_temp_new_i32();
+            tcg_gen_shli_i32(tmp, cpu_R[arg[1]], shift);
+            tcg_gen_sari_i32(cpu_R[arg[0]], tmp, shift);
+            tcg_temp_free(tmp);
+        }
+    }
+}
+
+static void translate_simcall(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (semihosting_enabled()) {
+        if (gen_check_privilege(dc)) {
+            gen_helper_simcall(cpu_env);
+        }
+    } else {
+        qemu_log_mask(LOG_GUEST_ERROR, "SIMCALL but semihosting is disabled\n");
+        gen_exception_cause(dc, ILLEGAL_INSTRUCTION_CAUSE);
+    }
+}
+
+/*
+ * Note: 64 bit ops are used here solely because SAR values
+ * have range 0..63
+ */
+#define gen_shift_reg(cmd, reg) do { \
+                    TCGv_i64 tmp = tcg_temp_new_i64(); \
+                    tcg_gen_extu_i32_i64(tmp, reg); \
+                    tcg_gen_##cmd##_i64(v, v, tmp); \
+                    tcg_gen_extrl_i64_i32(cpu_R[arg[0]], v); \
+                    tcg_temp_free_i64(v); \
+                    tcg_temp_free_i64(tmp); \
+                } while (0)
+
+#define gen_shift(cmd) gen_shift_reg(cmd, cpu_SR[SAR])
+
+static void translate_sll(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        if (dc->sar_m32_5bit) {
+            tcg_gen_shl_i32(cpu_R[arg[0]], cpu_R[arg[1]], dc->sar_m32);
+        } else {
+            TCGv_i64 v = tcg_temp_new_i64();
+            TCGv_i32 s = tcg_const_i32(32);
+            tcg_gen_sub_i32(s, s, cpu_SR[SAR]);
+            tcg_gen_andi_i32(s, s, 0x3f);
+            tcg_gen_extu_i32_i64(v, cpu_R[arg[1]]);
+            gen_shift_reg(shl, s);
+            tcg_temp_free(s);
+        }
+    }
+}
+
+static void translate_slli(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        if (arg[2] == 32) {
+            qemu_log_mask(LOG_GUEST_ERROR, "slli a%d, a%d, 32 is undefined",
+                          arg[0], arg[1]);
+        }
+        tcg_gen_shli_i32(cpu_R[arg[0]], cpu_R[arg[1]], arg[2] & 0x1f);
+    }
+}
+
+static void translate_sra(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        if (dc->sar_m32_5bit) {
+            tcg_gen_sar_i32(cpu_R[arg[0]], cpu_R[arg[1]], cpu_SR[SAR]);
+        } else {
+            TCGv_i64 v = tcg_temp_new_i64();
+            tcg_gen_ext_i32_i64(v, cpu_R[arg[1]]);
+            gen_shift(sar);
+        }
+    }
+}
+
+static void translate_srai(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        tcg_gen_sari_i32(cpu_R[arg[0]], cpu_R[arg[1]], arg[2]);
+    }
+}
+
+static void translate_src(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check3(dc, arg[0], arg[1], arg[2])) {
+        TCGv_i64 v = tcg_temp_new_i64();
+        tcg_gen_concat_i32_i64(v, cpu_R[arg[2]], cpu_R[arg[1]]);
+        gen_shift(shr);
+    }
+}
+
+static void translate_srl(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        if (dc->sar_m32_5bit) {
+            tcg_gen_shr_i32(cpu_R[arg[0]], cpu_R[arg[1]], cpu_SR[SAR]);
+        } else {
+            TCGv_i64 v = tcg_temp_new_i64();
+            tcg_gen_extu_i32_i64(v, cpu_R[arg[1]]);
+            gen_shift(shr);
+        }
+    }
+}
+
+#undef gen_shift
+#undef gen_shift_reg
+
+static void translate_srli(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        tcg_gen_shri_i32(cpu_R[arg[0]], cpu_R[arg[1]], arg[2]);
+    }
+}
+
+static void translate_ssa8b(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, arg[0])) {
+        TCGv_i32 tmp = tcg_temp_new_i32();
+        tcg_gen_shli_i32(tmp, cpu_R[arg[0]], 3);
+        gen_left_shift_sar(dc, tmp);
+        tcg_temp_free(tmp);
+    }
+}
+
+static void translate_ssa8l(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, arg[0])) {
+        TCGv_i32 tmp = tcg_temp_new_i32();
+        tcg_gen_shli_i32(tmp, cpu_R[arg[0]], 3);
+        gen_right_shift_sar(dc, tmp);
+        tcg_temp_free(tmp);
+    }
+}
+
+static void translate_ssai(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    TCGv_i32 tmp = tcg_const_i32(arg[0]);
+    gen_right_shift_sar(dc, tmp);
+    tcg_temp_free(tmp);
+}
+
+static void translate_ssl(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, arg[0])) {
+        gen_left_shift_sar(dc, cpu_R[arg[0]]);
+    }
+}
+
+static void translate_ssr(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, arg[0])) {
+        gen_right_shift_sar(dc, cpu_R[arg[0]]);
+    }
+}
+
+static void translate_sub(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check3(dc, arg[0], arg[1], arg[2])) {
+        tcg_gen_sub_i32(cpu_R[arg[0]], cpu_R[arg[1]], cpu_R[arg[2]]);
+    }
+}
+
+static void translate_subx(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check3(dc, arg[0], arg[1], arg[2])) {
+        TCGv_i32 tmp = tcg_temp_new_i32();
+        tcg_gen_shli_i32(tmp, cpu_R[arg[1]], par[0]);
+        tcg_gen_sub_i32(cpu_R[arg[0]], tmp, cpu_R[arg[2]]);
+        tcg_temp_free(tmp);
+    }
+}
+
+static void translate_syscall(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    gen_exception_cause(dc, SYSCALL_CAUSE);
+}
+
+static void translate_waiti(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_privilege(dc)) {
+        gen_waiti(dc, arg[0]);
+    }
+}
+
+static void translate_wtlb(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_privilege(dc) &&
+        gen_window_check2(dc, arg[0], arg[1])) {
+        TCGv_i32 dtlb = tcg_const_i32(par[0]);
+
+        gen_helper_wtlb(cpu_env, cpu_R[arg[0]], cpu_R[arg[1]], dtlb);
+        /* This could change memory mapping, so exit tb */
+        gen_jumpi_check_loop_end(dc, -1);
+        tcg_temp_free(dtlb);
+    }
+}
+
+static void translate_wer(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_privilege(dc) &&
+        gen_window_check2(dc, arg[0], arg[1])) {
+        gen_helper_wer(cpu_env, cpu_R[arg[0]], cpu_R[arg[1]]);
+    }
+}
+
+static void translate_wsr(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if ((par[0] < 64 || gen_check_privilege(dc)) &&
+       gen_window_check1(dc, arg[0])) {
+        gen_wsr(dc, par[0], cpu_R[arg[0]]);
+    }
+}
+
+static void translate_wur(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, arg[0])) {
+        if (uregnames[par[0]].name) {
+            gen_wur(par[0], cpu_R[arg[0]]);
+        } else {
+            qemu_log_mask(LOG_UNIMP, "WUR %d not implemented, ", par[0]);
+        }
+    }
+}
+
+static void translate_xor(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check3(dc, arg[0], arg[1], arg[2])) {
+        tcg_gen_xor_i32(cpu_R[arg[0]], cpu_R[arg[1]], cpu_R[arg[2]]);
+    }
+}
+
+static void translate_xsr(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if ((par[0] < 64 || gen_check_privilege(dc)) &&
+       gen_window_check1(dc, arg[0])) {
+        TCGv_i32 tmp = tcg_temp_new_i32();
+        bool rsr_end, wsr_end;
+
+        tcg_gen_mov_i32(tmp, cpu_R[arg[0]]);
+        rsr_end = gen_rsr(dc, cpu_R[arg[0]], par[0]);
+        wsr_end = gen_wsr(dc, par[0], tmp);
+        tcg_temp_free(tmp);
+        if (rsr_end && !wsr_end) {
+            gen_jumpi_check_loop_end(dc, 0);
+        }
+    }
+}
+
+static const XtensaOpcodeMap core_map[] = {
+    { "abs", translate_abs },
+    { "add", translate_add },
+    { "add.n", translate_add },
+    { "addi", translate_addi },
+    { "addi.n", translate_addi },
+    { "addmi", translate_addi },
+    { "addx2", translate_addx, (uint32_t[]){1} },
+    { "addx4", translate_addx, (uint32_t[]){2} },
+    { "addx8", translate_addx, (uint32_t[]){3} },
+    { "all4", translate_all, (uint32_t[]){true, 4} },
+    { "all8", translate_all, (uint32_t[]){true, 8} },
+    { "and", translate_and },
+    { "any4", translate_all, (uint32_t[]){false, 4} },
+    { "any8", translate_all, (uint32_t[]){false, 8} },
+    { "ball", translate_ball, (uint32_t[]){TCG_COND_EQ} },
+    { "bany", translate_bany, (uint32_t[]){TCG_COND_NE} },
+    { "bbc", translate_bb, (uint32_t[]){TCG_COND_EQ} },
+    { "bbci", translate_bbi, (uint32_t[]){TCG_COND_EQ} },
+    { "bbs", translate_bb, (uint32_t[]){TCG_COND_NE} },
+    { "bbsi", translate_bbi, (uint32_t[]){TCG_COND_NE} },
+    { "beq", translate_b, (uint32_t[]){TCG_COND_EQ} },
+    { "beqi", translate_bi, (uint32_t[]){TCG_COND_EQ} },
+    { "beqz", translate_bz, (uint32_t[]){TCG_COND_EQ} },
+    { "beqz.n", translate_bz, (uint32_t[]){TCG_COND_EQ} },
+    { "bge", translate_b, (uint32_t[]){TCG_COND_GE} },
+    { "bgei", translate_bi, (uint32_t[]){TCG_COND_GE} },
+    { "bgeu", translate_b, (uint32_t[]){TCG_COND_GEU} },
+    { "bgeui", translate_bi, (uint32_t[]){TCG_COND_GEU} },
+    { "bgez", translate_bz, (uint32_t[]){TCG_COND_GE} },
+    { "blt", translate_b, (uint32_t[]){TCG_COND_LT} },
+    { "blti", translate_bi, (uint32_t[]){TCG_COND_LT} },
+    { "bltu", translate_b, (uint32_t[]){TCG_COND_LTU} },
+    { "bltui", translate_bi, (uint32_t[]){TCG_COND_LTU} },
+    { "bltz", translate_bz, (uint32_t[]){TCG_COND_LT} },
+    { "bnall", translate_ball, (uint32_t[]){TCG_COND_NE} },
+    { "bne", translate_b, (uint32_t[]){TCG_COND_NE} },
+    { "bnei", translate_bi, (uint32_t[]){TCG_COND_NE} },
+    { "bnez", translate_bz, (uint32_t[]){TCG_COND_NE} },
+    { "bnez.n", translate_bz, (uint32_t[]){TCG_COND_NE} },
+    { "bnone", translate_bany, (uint32_t[]){TCG_COND_EQ} },
+    { "break", translate_break, (uint32_t[]){DEBUGCAUSE_BI} },
+    { "break.n", translate_break, (uint32_t[]){DEBUGCAUSE_BN} },
+    { "call0", translate_call0 },
+    { "call12", translate_callw, (uint32_t[]){3} },
+    { "call4", translate_callw, (uint32_t[]){1} },
+    { "call8", translate_callw, (uint32_t[]){2} },
+    { "callx0", translate_callx0 },
+    { "callx12", translate_callxw, (uint32_t[]){3} },
+    { "callx4", translate_callxw, (uint32_t[]){1} },
+    { "callx8", translate_callxw, (uint32_t[]){2} },
+    { "clamps", translate_clamps },
+    { "depbits", translate_depbits },
+    { "dhi", translate_dcache, (uint32_t[]){true, true} },
+    { "dhu", translate_dcache, (uint32_t[]){true, true} },
+    { "dhwb", translate_dcache, (uint32_t[]){false, true} },
+    { "dhwbi", translate_dcache, (uint32_t[]){false, true} },
+    { "dii", translate_dcache, (uint32_t[]){true, false} },
+    { "diu", translate_dcache, (uint32_t[]){true, false} },
+    { "diwb", translate_dcache, (uint32_t[]){true, false} },
+    { "diwbi", translate_dcache, (uint32_t[]){true, false} },
+    { "dpfl", translate_dcache, (uint32_t[]){true, true} },
+    { "dpfr", translate_dcache, (uint32_t[]){false, false} },
+    { "dpfro", translate_dcache, (uint32_t[]){false, false} },
+    { "dpfw", translate_dcache, (uint32_t[]){false, false} },
+    { "dpfwo", translate_dcache, (uint32_t[]){false, false} },
+    { "dsync", translate_nop },
+    { "entry", translate_entry },
+    { "esync", translate_nop },
+    { "excw", translate_nop },
+    { "extui", translate_extui },
+    { "extw", translate_nop },
+    { "idtlb", translate_itlb, (uint32_t[]){true} },
+    { "ihi", translate_icache, (uint32_t[]){false, true} },
+    { "ihu", translate_icache, (uint32_t[]){true, true} },
+    { "iii", translate_icache, (uint32_t[]){true, false} },
+    { "iitlb", translate_itlb, (uint32_t[]){false} },
+    { "iiu", translate_icache, (uint32_t[]){true, false} },
+    { "ill", translate_ill },
+    { "ill.n", translate_ill },
+    { "ipf", translate_icache, (uint32_t[]){false, false} },
+    { "ipfl", translate_icache, (uint32_t[]){true, true} },
+    { "isync", translate_nop },
+    { "j", translate_j },
+    { "jx", translate_jx },
+    { "l16si", translate_ldst, (uint32_t[]){MO_TESW, false, false} },
+    { "l16ui", translate_ldst, (uint32_t[]){MO_TEUW, false, false} },
+    { "l32ai", translate_ldst, (uint32_t[]){MO_TEUL, true, false} },
+    { "l32e", translate_l32e },
+    { "l32i", translate_ldst, (uint32_t[]){MO_TEUL, false, false} },
+    { "l32i.n", translate_ldst, (uint32_t[]){MO_TEUL, false, false} },
+    { "l32r", translate_l32r },
+    { "l8ui", translate_ldst, (uint32_t[]){MO_UB, false, false} },
+    { "lddec", translate_mac16, (uint32_t[]){MAC16_NONE, 0, 0, -4} },
+    { "ldinc", translate_mac16, (uint32_t[]){MAC16_NONE, 0, 0, 4} },
+    { "loop", translate_loop, (uint32_t[]){TCG_COND_NEVER} },
+    { "loopgtz", translate_loop, (uint32_t[]){TCG_COND_GT} },
+    { "loopnez", translate_loop, (uint32_t[]){TCG_COND_NE} },
+    { "max", translate_minmax, (uint32_t[]){TCG_COND_GE} },
+    { "maxu", translate_minmax, (uint32_t[]){TCG_COND_GEU} },
+    { "memw", translate_nop },
+    { "min", translate_minmax, (uint32_t[]){TCG_COND_LT} },
+    { "minu", translate_minmax, (uint32_t[]){TCG_COND_LTU} },
+    { "mov", translate_mov },
+    { "mov.n", translate_mov },
+    { "moveqz", translate_movcond, (uint32_t[]){TCG_COND_EQ} },
+    { "movgez", translate_movcond, (uint32_t[]){TCG_COND_GE} },
+    { "movi", translate_movi },
+    { "movi.n", translate_movi },
+    { "movltz", translate_movcond, (uint32_t[]){TCG_COND_LT} },
+    { "movnez", translate_movcond, (uint32_t[]){TCG_COND_NE} },
+    { "movsp", translate_movsp },
+    { "mul.aa.hh", translate_mac16, (uint32_t[]){MAC16_MUL, MAC16_AA, MAC16_HH, 0} },
+    { "mul.aa.hl", translate_mac16, (uint32_t[]){MAC16_MUL, MAC16_AA, MAC16_HL, 0} },
+    { "mul.aa.lh", translate_mac16, (uint32_t[]){MAC16_MUL, MAC16_AA, MAC16_LH, 0} },
+    { "mul.aa.ll", translate_mac16, (uint32_t[]){MAC16_MUL, MAC16_AA, MAC16_LL, 0} },
+    { "mul.ad.hh", translate_mac16, (uint32_t[]){MAC16_MUL, MAC16_AD, MAC16_HH, 0} },
+    { "mul.ad.hl", translate_mac16, (uint32_t[]){MAC16_MUL, MAC16_AD, MAC16_HL, 0} },
+    { "mul.ad.lh", translate_mac16, (uint32_t[]){MAC16_MUL, MAC16_AD, MAC16_LH, 0} },
+    { "mul.ad.ll", translate_mac16, (uint32_t[]){MAC16_MUL, MAC16_AD, MAC16_LL, 0} },
+    { "mul.da.hh", translate_mac16, (uint32_t[]){MAC16_MUL, MAC16_DA, MAC16_HH, 0} },
+    { "mul.da.hl", translate_mac16, (uint32_t[]){MAC16_MUL, MAC16_DA, MAC16_HL, 0} },
+    { "mul.da.lh", translate_mac16, (uint32_t[]){MAC16_MUL, MAC16_DA, MAC16_LH, 0} },
+    { "mul.da.ll", translate_mac16, (uint32_t[]){MAC16_MUL, MAC16_DA, MAC16_LL, 0} },
+    { "mul.dd.hh", translate_mac16, (uint32_t[]){MAC16_MUL, MAC16_DD, MAC16_HH, 0} },
+    { "mul.dd.hl", translate_mac16, (uint32_t[]){MAC16_MUL, MAC16_DD, MAC16_HL, 0} },
+    { "mul.dd.lh", translate_mac16, (uint32_t[]){MAC16_MUL, MAC16_DD, MAC16_LH, 0} },
+    { "mul.dd.ll", translate_mac16, (uint32_t[]){MAC16_MUL, MAC16_DD, MAC16_LL, 0} },
+    { "mul16s", translate_mul16, (uint32_t[]){true} },
+    { "mul16u", translate_mul16, (uint32_t[]){false} },
+    { "mula.aa.hh", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_AA, MAC16_HH, 0} },
+    { "mula.aa.hl", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_AA, MAC16_HL, 0} },
+    { "mula.aa.lh", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_AA, MAC16_LH, 0} },
+    { "mula.aa.ll", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_AA, MAC16_LL, 0} },
+    { "mula.ad.hh", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_AD, MAC16_HH, 0} },
+    { "mula.ad.hl", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_AD, MAC16_HL, 0} },
+    { "mula.ad.lh", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_AD, MAC16_LH, 0} },
+    { "mula.ad.ll", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_AD, MAC16_LL, 0} },
+    { "mula.da.hh", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DA, MAC16_HH, 0} },
+    { "mula.da.hh.lddec", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DA, MAC16_HH, -4} },
+    { "mula.da.hh.ldinc", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DA, MAC16_HH, 4} },
+    { "mula.da.hl", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DA, MAC16_HL, 0} },
+    { "mula.da.hl.lddec", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DA, MAC16_HL, -4} },
+    { "mula.da.hl.ldinc", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DA, MAC16_HL, 4} },
+    { "mula.da.lh", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DA, MAC16_LH, 0} },
+    { "mula.da.lh.lddec", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DA, MAC16_LH, -4} },
+    { "mula.da.lh.ldinc", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DA, MAC16_LH, 4} },
+    { "mula.da.ll", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DA, MAC16_LL, 0} },
+    { "mula.da.ll.lddec", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DA, MAC16_LL, -4} },
+    { "mula.da.ll.ldinc", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DA, MAC16_LL, 4} },
+    { "mula.dd.hh", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DD, MAC16_HH, 0} },
+    { "mula.dd.hh.lddec", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DD, MAC16_HH, -4} },
+    { "mula.dd.hh.ldinc", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DD, MAC16_HH, 4} },
+    { "mula.dd.hl", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DD, MAC16_HL, 0} },
+    { "mula.dd.hl.lddec", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DD, MAC16_HL, -4} },
+    { "mula.dd.hl.ldinc", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DD, MAC16_HL, 4} },
+    { "mula.dd.lh", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DD, MAC16_LH, 0} },
+    { "mula.dd.lh.lddec", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DD, MAC16_LH, -4} },
+    { "mula.dd.lh.ldinc", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DD, MAC16_LH, 4} },
+    { "mula.dd.ll", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DD, MAC16_LL, 0} },
+    { "mula.dd.ll.lddec", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DD, MAC16_LL, -4} },
+    { "mula.dd.ll.ldinc", translate_mac16, (uint32_t[]){MAC16_MULA, MAC16_DD, MAC16_LL, 4} },
+    { "mull", translate_mull },
+    { "muls.aa.hh", translate_mac16, (uint32_t[]){MAC16_MULS, MAC16_AA, MAC16_HH, 0} },
+    { "muls.aa.hl", translate_mac16, (uint32_t[]){MAC16_MULS, MAC16_AA, MAC16_HL, 0} },
+    { "muls.aa.lh", translate_mac16, (uint32_t[]){MAC16_MULS, MAC16_AA, MAC16_LH, 0} },
+    { "muls.aa.ll", translate_mac16, (uint32_t[]){MAC16_MULS, MAC16_AA, MAC16_LL, 0} },
+    { "muls.ad.hh", translate_mac16, (uint32_t[]){MAC16_MULS, MAC16_AD, MAC16_HH, 0} },
+    { "muls.ad.hl", translate_mac16, (uint32_t[]){MAC16_MULS, MAC16_AD, MAC16_HL, 0} },
+    { "muls.ad.lh", translate_mac16, (uint32_t[]){MAC16_MULS, MAC16_AD, MAC16_LH, 0} },
+    { "muls.ad.ll", translate_mac16, (uint32_t[]){MAC16_MULS, MAC16_AD, MAC16_LL, 0} },
+    { "muls.da.hh", translate_mac16, (uint32_t[]){MAC16_MULS, MAC16_DA, MAC16_HH, 0} },
+    { "muls.da.hl", translate_mac16, (uint32_t[]){MAC16_MULS, MAC16_DA, MAC16_HL, 0} },
+    { "muls.da.lh", translate_mac16, (uint32_t[]){MAC16_MULS, MAC16_DA, MAC16_LH, 0} },
+    { "muls.da.ll", translate_mac16, (uint32_t[]){MAC16_MULS, MAC16_DA, MAC16_LL, 0} },
+    { "muls.dd.hh", translate_mac16, (uint32_t[]){MAC16_MULS, MAC16_DD, MAC16_HH, 0} },
+    { "muls.dd.hl", translate_mac16, (uint32_t[]){MAC16_MULS, MAC16_DD, MAC16_HL, 0} },
+    { "muls.dd.lh", translate_mac16, (uint32_t[]){MAC16_MULS, MAC16_DD, MAC16_LH, 0} },
+    { "muls.dd.ll", translate_mac16, (uint32_t[]){MAC16_MULS, MAC16_DD, MAC16_LL, 0} },
+    { "mulsh", translate_mulh, (uint32_t[]){true} },
+    { "muluh", translate_mulh, (uint32_t[]){false} },
+    { "neg", translate_neg },
+    { "nop", translate_nop },
+    { "nop.n", translate_nop },
+    { "nsa", translate_nsa },
+    { "nsau", translate_nsau },
+    { "or", translate_or },
+    { "pdtlb", translate_ptlb, (uint32_t[]){true} },
+    { "pitlb", translate_ptlb, (uint32_t[]){false} },
+    { "quos", translate_quos, (uint32_t[]){true} },
+    { "quou", translate_quou, (uint32_t[]){true} },
+    { "rdtlb0", translate_rtlb, (uint32_t[]){true, 0} },
+    { "rdtlb1", translate_rtlb, (uint32_t[]){true, 1} },
+    { "rems", translate_quos, (uint32_t[]){false} },
+    { "remu", translate_quou, (uint32_t[]){false} },
+    { "rer", translate_rer },
+    { "ret", translate_ret },
+    { "ret.n", translate_ret },
+    { "retw", translate_retw },
+    { "retw.n", translate_retw },
+    { "rfde", translate_rfde },
+    { "rfe", translate_rfe },
+    { "rfi", translate_rfi },
+    { "rfwo", translate_rfw, (uint32_t[]){true} },
+    { "rfwu", translate_rfw, (uint32_t[]){false} },
+    { "ritlb0", translate_rtlb, (uint32_t[]){false, 0} },
+    { "ritlb1", translate_rtlb, (uint32_t[]){false, 1} },
+    { "rotw", translate_rotw },
+    { "rsil", translate_rsil },
+    { "rsr.176", translate_rsr, (uint32_t[]){176} },
+    { "rsr.208", translate_rsr, (uint32_t[]){208} },
+    { "rsr.acchi", translate_rsr, (uint32_t[]){ACCHI} },
+    { "rsr.acclo", translate_rsr, (uint32_t[]){ACCLO} },
+    { "rsr.atomctl", translate_rsr, (uint32_t[]){ATOMCTL} },
+    { "rsr.br", translate_rsr, (uint32_t[]){BR} },
+    { "rsr.cacheattr", translate_rsr, (uint32_t[]){CACHEATTR} },
+    { "rsr.ccompare0", translate_rsr, (uint32_t[]){CCOMPARE} },
+    { "rsr.ccompare1", translate_rsr, (uint32_t[]){CCOMPARE + 1} },
+    { "rsr.ccompare2", translate_rsr, (uint32_t[]){CCOMPARE + 2} },
+    { "rsr.ccount", translate_rsr, (uint32_t[]){CCOUNT} },
+    { "rsr.configid0", translate_rsr, (uint32_t[]){CONFIGID0} },
+    { "rsr.configid1", translate_rsr, (uint32_t[]){CONFIGID1} },
+    { "rsr.cpenable", translate_rsr, (uint32_t[]){CPENABLE} },
+    { "rsr.dbreaka0", translate_rsr, (uint32_t[]){DBREAKA} },
+    { "rsr.dbreaka1", translate_rsr, (uint32_t[]){DBREAKA + 1} },
+    { "rsr.dbreakc0", translate_rsr, (uint32_t[]){DBREAKC} },
+    { "rsr.dbreakc1", translate_rsr, (uint32_t[]){DBREAKC + 1} },
+    { "rsr.debugcause", translate_rsr, (uint32_t[]){DEBUGCAUSE} },
+    { "rsr.depc", translate_rsr, (uint32_t[]){DEPC} },
+    { "rsr.dtlbcfg", translate_rsr, (uint32_t[]){DTLBCFG} },
+    { "rsr.epc1", translate_rsr, (uint32_t[]){EPC1} },
+    { "rsr.epc2", translate_rsr, (uint32_t[]){EPC1 + 1} },
+    { "rsr.epc3", translate_rsr, (uint32_t[]){EPC1 + 2} },
+    { "rsr.epc4", translate_rsr, (uint32_t[]){EPC1 + 3} },
+    { "rsr.epc5", translate_rsr, (uint32_t[]){EPC1 + 4} },
+    { "rsr.epc6", translate_rsr, (uint32_t[]){EPC1 + 5} },
+    { "rsr.epc7", translate_rsr, (uint32_t[]){EPC1 + 6} },
+    { "rsr.eps2", translate_rsr, (uint32_t[]){EPS2} },
+    { "rsr.eps3", translate_rsr, (uint32_t[]){EPS2 + 1} },
+    { "rsr.eps4", translate_rsr, (uint32_t[]){EPS2 + 2} },
+    { "rsr.eps5", translate_rsr, (uint32_t[]){EPS2 + 3} },
+    { "rsr.eps6", translate_rsr, (uint32_t[]){EPS2 + 4} },
+    { "rsr.eps7", translate_rsr, (uint32_t[]){EPS2 + 5} },
+    { "rsr.exccause", translate_rsr, (uint32_t[]){EXCCAUSE} },
+    { "rsr.excsave1", translate_rsr, (uint32_t[]){EXCSAVE1} },
+    { "rsr.excsave2", translate_rsr, (uint32_t[]){EXCSAVE1 + 1} },
+    { "rsr.excsave3", translate_rsr, (uint32_t[]){EXCSAVE1 + 2} },
+    { "rsr.excsave4", translate_rsr, (uint32_t[]){EXCSAVE1 + 3} },
+    { "rsr.excsave5", translate_rsr, (uint32_t[]){EXCSAVE1 + 4} },
+    { "rsr.excsave6", translate_rsr, (uint32_t[]){EXCSAVE1 + 5} },
+    { "rsr.excsave7", translate_rsr, (uint32_t[]){EXCSAVE1 + 6} },
+    { "rsr.excvaddr", translate_rsr, (uint32_t[]){EXCVADDR} },
+    { "rsr.ibreaka0", translate_rsr, (uint32_t[]){IBREAKA} },
+    { "rsr.ibreaka1", translate_rsr, (uint32_t[]){IBREAKA + 1} },
+    { "rsr.ibreakenable", translate_rsr, (uint32_t[]){IBREAKENABLE} },
+    { "rsr.icount", translate_rsr, (uint32_t[]){ICOUNT} },
+    { "rsr.icountlevel", translate_rsr, (uint32_t[]){ICOUNTLEVEL} },
+    { "rsr.intclear", translate_rsr, (uint32_t[]){INTCLEAR} },
+    { "rsr.intenable", translate_rsr, (uint32_t[]){INTENABLE} },
+    { "rsr.interrupt", translate_rsr, (uint32_t[]){INTSET} },
+    { "rsr.intset", translate_rsr, (uint32_t[]){INTSET} },
+    { "rsr.itlbcfg", translate_rsr, (uint32_t[]){ITLBCFG} },
+    { "rsr.lbeg", translate_rsr, (uint32_t[]){LBEG} },
+    { "rsr.lcount", translate_rsr, (uint32_t[]){LCOUNT} },
+    { "rsr.lend", translate_rsr, (uint32_t[]){LEND} },
+    { "rsr.litbase", translate_rsr, (uint32_t[]){LITBASE} },
+    { "rsr.m0", translate_rsr, (uint32_t[]){MR} },
+    { "rsr.m1", translate_rsr, (uint32_t[]){MR + 1} },
+    { "rsr.m2", translate_rsr, (uint32_t[]){MR + 2} },
+    { "rsr.m3", translate_rsr, (uint32_t[]){MR + 3} },
+    { "rsr.memctl", translate_rsr, (uint32_t[]){MEMCTL} },
+    { "rsr.misc0", translate_rsr, (uint32_t[]){MISC} },
+    { "rsr.misc1", translate_rsr, (uint32_t[]){MISC + 1} },
+    { "rsr.misc2", translate_rsr, (uint32_t[]){MISC + 2} },
+    { "rsr.misc3", translate_rsr, (uint32_t[]){MISC + 3} },
+    { "rsr.prid", translate_rsr, (uint32_t[]){PRID} },
+    { "rsr.ps", translate_rsr, (uint32_t[]){PS} },
+    { "rsr.ptevaddr", translate_rsr, (uint32_t[]){PTEVADDR} },
+    { "rsr.rasid", translate_rsr, (uint32_t[]){RASID} },
+    { "rsr.sar", translate_rsr, (uint32_t[]){SAR} },
+    { "rsr.scompare1", translate_rsr, (uint32_t[]){SCOMPARE1} },
+    { "rsr.vecbase", translate_rsr, (uint32_t[]){VECBASE} },
+    { "rsr.windowbase", translate_rsr, (uint32_t[]){WINDOW_BASE} },
+    { "rsr.windowstart", translate_rsr, (uint32_t[]){WINDOW_START} },
+    { "rsync", translate_nop },
+    { "rur.fcr", translate_rur, (uint32_t[]){FCR} },
+    { "rur.fsr", translate_rur, (uint32_t[]){FSR} },
+    { "rur.threadptr", translate_rur, (uint32_t[]){THREADPTR} },
+    { "s16i", translate_ldst, (uint32_t[]){MO_TEUW, false, true} },
+    { "s32c1i", translate_s32c1i },
+    { "s32e", translate_s32e },
+    { "s32i", translate_ldst, (uint32_t[]){MO_TEUL, false, true} },
+    { "s32i.n", translate_ldst, (uint32_t[]){MO_TEUL, false, true} },
+    { "s32nb", translate_ldst, (uint32_t[]){MO_TEUL, false, true} },
+    { "s32ri", translate_ldst, (uint32_t[]){MO_TEUL, true, true} },
+    { "s8i", translate_ldst, (uint32_t[]){MO_UB, false, true} },
+    { "sext", translate_sext },
+    { "simcall", translate_simcall },
+    { "sll", translate_sll },
+    { "slli", translate_slli },
+    { "sra", translate_sra },
+    { "srai", translate_srai },
+    { "src", translate_src },
+    { "srl", translate_srl },
+    { "srli", translate_srli },
+    { "ssa8b", translate_ssa8b },
+    { "ssa8l", translate_ssa8l },
+    { "ssai", translate_ssai },
+    { "ssl", translate_ssl },
+    { "ssr", translate_ssr },
+    { "sub", translate_sub },
+    { "subx2", translate_subx, (uint32_t[]){1} },
+    { "subx4", translate_subx, (uint32_t[]){2} },
+    { "subx8", translate_subx, (uint32_t[]){3} },
+    { "syscall", translate_syscall },
+    { "umul.aa.hh", translate_mac16, (uint32_t[]){MAC16_UMUL, MAC16_AA, MAC16_HH, 0} },
+    { "umul.aa.hl", translate_mac16, (uint32_t[]){MAC16_UMUL, MAC16_AA, MAC16_HL, 0} },
+    { "umul.aa.lh", translate_mac16, (uint32_t[]){MAC16_UMUL, MAC16_AA, MAC16_LH, 0} },
+    { "umul.aa.ll", translate_mac16, (uint32_t[]){MAC16_UMUL, MAC16_AA, MAC16_LL, 0} },
+    { "waiti", translate_waiti },
+    { "wdtlb", translate_wtlb, (uint32_t[]){true} },
+    { "wer", translate_wer },
+    { "witlb", translate_wtlb, (uint32_t[]){false} },
+    { "wsr.176", translate_wsr, (uint32_t[]){176} },
+    { "wsr.208", translate_wsr, (uint32_t[]){208} },
+    { "wsr.acchi", translate_wsr, (uint32_t[]){ACCHI} },
+    { "wsr.acclo", translate_wsr, (uint32_t[]){ACCLO} },
+    { "wsr.atomctl", translate_wsr, (uint32_t[]){ATOMCTL} },
+    { "wsr.br", translate_wsr, (uint32_t[]){BR} },
+    { "wsr.cacheattr", translate_wsr, (uint32_t[]){CACHEATTR} },
+    { "wsr.ccompare0", translate_wsr, (uint32_t[]){CCOMPARE} },
+    { "wsr.ccompare1", translate_wsr, (uint32_t[]){CCOMPARE + 1} },
+    { "wsr.ccompare2", translate_wsr, (uint32_t[]){CCOMPARE + 2} },
+    { "wsr.ccount", translate_wsr, (uint32_t[]){CCOUNT} },
+    { "wsr.configid0", translate_wsr, (uint32_t[]){CONFIGID0} },
+    { "wsr.configid1", translate_wsr, (uint32_t[]){CONFIGID1} },
+    { "wsr.cpenable", translate_wsr, (uint32_t[]){CPENABLE} },
+    { "wsr.dbreaka0", translate_wsr, (uint32_t[]){DBREAKA} },
+    { "wsr.dbreaka1", translate_wsr, (uint32_t[]){DBREAKA + 1} },
+    { "wsr.dbreakc0", translate_wsr, (uint32_t[]){DBREAKC} },
+    { "wsr.dbreakc1", translate_wsr, (uint32_t[]){DBREAKC + 1} },
+    { "wsr.debugcause", translate_wsr, (uint32_t[]){DEBUGCAUSE} },
+    { "wsr.depc", translate_wsr, (uint32_t[]){DEPC} },
+    { "wsr.dtlbcfg", translate_wsr, (uint32_t[]){DTLBCFG} },
+    { "wsr.epc1", translate_wsr, (uint32_t[]){EPC1} },
+    { "wsr.epc2", translate_wsr, (uint32_t[]){EPC1 + 1} },
+    { "wsr.epc3", translate_wsr, (uint32_t[]){EPC1 + 2} },
+    { "wsr.epc4", translate_wsr, (uint32_t[]){EPC1 + 3} },
+    { "wsr.epc5", translate_wsr, (uint32_t[]){EPC1 + 4} },
+    { "wsr.epc6", translate_wsr, (uint32_t[]){EPC1 + 5} },
+    { "wsr.epc7", translate_wsr, (uint32_t[]){EPC1 + 6} },
+    { "wsr.eps2", translate_wsr, (uint32_t[]){EPS2} },
+    { "wsr.eps3", translate_wsr, (uint32_t[]){EPS2 + 1} },
+    { "wsr.eps4", translate_wsr, (uint32_t[]){EPS2 + 2} },
+    { "wsr.eps5", translate_wsr, (uint32_t[]){EPS2 + 3} },
+    { "wsr.eps6", translate_wsr, (uint32_t[]){EPS2 + 4} },
+    { "wsr.eps7", translate_wsr, (uint32_t[]){EPS2 + 5} },
+    { "wsr.exccause", translate_wsr, (uint32_t[]){EXCCAUSE} },
+    { "wsr.excsave1", translate_wsr, (uint32_t[]){EXCSAVE1} },
+    { "wsr.excsave2", translate_wsr, (uint32_t[]){EXCSAVE1 + 1} },
+    { "wsr.excsave3", translate_wsr, (uint32_t[]){EXCSAVE1 + 2} },
+    { "wsr.excsave4", translate_wsr, (uint32_t[]){EXCSAVE1 + 3} },
+    { "wsr.excsave5", translate_wsr, (uint32_t[]){EXCSAVE1 + 4} },
+    { "wsr.excsave6", translate_wsr, (uint32_t[]){EXCSAVE1 + 5} },
+    { "wsr.excsave7", translate_wsr, (uint32_t[]){EXCSAVE1 + 6} },
+    { "wsr.excvaddr", translate_wsr, (uint32_t[]){EXCVADDR} },
+    { "wsr.ibreaka0", translate_wsr, (uint32_t[]){IBREAKA} },
+    { "wsr.ibreaka1", translate_wsr, (uint32_t[]){IBREAKA + 1} },
+    { "wsr.ibreakenable", translate_wsr, (uint32_t[]){IBREAKENABLE} },
+    { "wsr.icount", translate_wsr, (uint32_t[]){ICOUNT} },
+    { "wsr.icountlevel", translate_wsr, (uint32_t[]){ICOUNTLEVEL} },
+    { "wsr.intclear", translate_wsr, (uint32_t[]){INTCLEAR} },
+    { "wsr.intenable", translate_wsr, (uint32_t[]){INTENABLE} },
+    { "wsr.interrupt", translate_wsr, (uint32_t[]){INTSET} },
+    { "wsr.intset", translate_wsr, (uint32_t[]){INTSET} },
+    { "wsr.itlbcfg", translate_wsr, (uint32_t[]){ITLBCFG} },
+    { "wsr.lbeg", translate_wsr, (uint32_t[]){LBEG} },
+    { "wsr.lcount", translate_wsr, (uint32_t[]){LCOUNT} },
+    { "wsr.lend", translate_wsr, (uint32_t[]){LEND} },
+    { "wsr.litbase", translate_wsr, (uint32_t[]){LITBASE} },
+    { "wsr.m0", translate_wsr, (uint32_t[]){MR} },
+    { "wsr.m1", translate_wsr, (uint32_t[]){MR + 1} },
+    { "wsr.m2", translate_wsr, (uint32_t[]){MR + 2} },
+    { "wsr.m3", translate_wsr, (uint32_t[]){MR + 3} },
+    { "wsr.memctl", translate_wsr, (uint32_t[]){MEMCTL} },
+    { "wsr.misc0", translate_wsr, (uint32_t[]){MISC} },
+    { "wsr.misc1", translate_wsr, (uint32_t[]){MISC + 1} },
+    { "wsr.misc2", translate_wsr, (uint32_t[]){MISC + 2} },
+    { "wsr.misc3", translate_wsr, (uint32_t[]){MISC + 3} },
+    { "wsr.prid", translate_wsr, (uint32_t[]){PRID} },
+    { "wsr.ps", translate_wsr, (uint32_t[]){PS} },
+    { "wsr.ptevaddr", translate_wsr, (uint32_t[]){PTEVADDR} },
+    { "wsr.rasid", translate_wsr, (uint32_t[]){RASID} },
+    { "wsr.sar", translate_wsr, (uint32_t[]){SAR} },
+    { "wsr.scompare1", translate_wsr, (uint32_t[]){SCOMPARE1} },
+    { "wsr.vecbase", translate_wsr, (uint32_t[]){VECBASE} },
+    { "wsr.windowbase", translate_wsr, (uint32_t[]){WINDOW_BASE} },
+    { "wsr.windowstart", translate_wsr, (uint32_t[]){WINDOW_START} },
+    { "wur.fcr", translate_wur, (uint32_t[]){FCR} },
+    { "wur.fsr", translate_wur, (uint32_t[]){FSR} },
+    { "wur.threadptr", translate_wur, (uint32_t[]){THREADPTR} },
+    { "xor", translate_xor },
+    { "xsr.176", translate_xsr, (uint32_t[]){176} },
+    { "xsr.208", translate_xsr, (uint32_t[]){208} },
+    { "xsr.acchi", translate_xsr, (uint32_t[]){ACCHI} },
+    { "xsr.acclo", translate_xsr, (uint32_t[]){ACCLO} },
+    { "xsr.atomctl", translate_xsr, (uint32_t[]){ATOMCTL} },
+    { "xsr.br", translate_xsr, (uint32_t[]){BR} },
+    { "xsr.cacheattr", translate_xsr, (uint32_t[]){CACHEATTR} },
+    { "xsr.ccompare0", translate_xsr, (uint32_t[]){CCOMPARE} },
+    { "xsr.ccompare1", translate_xsr, (uint32_t[]){CCOMPARE + 1} },
+    { "xsr.ccompare2", translate_xsr, (uint32_t[]){CCOMPARE + 2} },
+    { "xsr.ccount", translate_xsr, (uint32_t[]){CCOUNT} },
+    { "xsr.configid0", translate_xsr, (uint32_t[]){CONFIGID0} },
+    { "xsr.configid1", translate_xsr, (uint32_t[]){CONFIGID1} },
+    { "xsr.cpenable", translate_xsr, (uint32_t[]){CPENABLE} },
+    { "xsr.dbreaka0", translate_xsr, (uint32_t[]){DBREAKA} },
+    { "xsr.dbreaka1", translate_xsr, (uint32_t[]){DBREAKA + 1} },
+    { "xsr.dbreakc0", translate_xsr, (uint32_t[]){DBREAKC} },
+    { "xsr.dbreakc1", translate_xsr, (uint32_t[]){DBREAKC + 1} },
+    { "xsr.debugcause", translate_xsr, (uint32_t[]){DEBUGCAUSE} },
+    { "xsr.depc", translate_xsr, (uint32_t[]){DEPC} },
+    { "xsr.dtlbcfg", translate_xsr, (uint32_t[]){DTLBCFG} },
+    { "xsr.epc1", translate_xsr, (uint32_t[]){EPC1} },
+    { "xsr.epc2", translate_xsr, (uint32_t[]){EPC1 + 1} },
+    { "xsr.epc3", translate_xsr, (uint32_t[]){EPC1 + 2} },
+    { "xsr.epc4", translate_xsr, (uint32_t[]){EPC1 + 3} },
+    { "xsr.epc5", translate_xsr, (uint32_t[]){EPC1 + 4} },
+    { "xsr.epc6", translate_xsr, (uint32_t[]){EPC1 + 5} },
+    { "xsr.epc7", translate_xsr, (uint32_t[]){EPC1 + 6} },
+    { "xsr.eps2", translate_xsr, (uint32_t[]){EPS2} },
+    { "xsr.eps3", translate_xsr, (uint32_t[]){EPS2 + 1} },
+    { "xsr.eps4", translate_xsr, (uint32_t[]){EPS2 + 2} },
+    { "xsr.eps5", translate_xsr, (uint32_t[]){EPS2 + 3} },
+    { "xsr.eps6", translate_xsr, (uint32_t[]){EPS2 + 4} },
+    { "xsr.eps7", translate_xsr, (uint32_t[]){EPS2 + 5} },
+    { "xsr.exccause", translate_xsr, (uint32_t[]){EXCCAUSE} },
+    { "xsr.excsave1", translate_xsr, (uint32_t[]){EXCSAVE1} },
+    { "xsr.excsave2", translate_xsr, (uint32_t[]){EXCSAVE1 + 1} },
+    { "xsr.excsave3", translate_xsr, (uint32_t[]){EXCSAVE1 + 2} },
+    { "xsr.excsave4", translate_xsr, (uint32_t[]){EXCSAVE1 + 3} },
+    { "xsr.excsave5", translate_xsr, (uint32_t[]){EXCSAVE1 + 4} },
+    { "xsr.excsave6", translate_xsr, (uint32_t[]){EXCSAVE1 + 5} },
+    { "xsr.excsave7", translate_xsr, (uint32_t[]){EXCSAVE1 + 6} },
+    { "xsr.excvaddr", translate_xsr, (uint32_t[]){EXCVADDR} },
+    { "xsr.ibreaka0", translate_xsr, (uint32_t[]){IBREAKA} },
+    { "xsr.ibreaka1", translate_xsr, (uint32_t[]){IBREAKA + 1} },
+    { "xsr.ibreakenable", translate_xsr, (uint32_t[]){IBREAKENABLE} },
+    { "xsr.icount", translate_xsr, (uint32_t[]){ICOUNT} },
+    { "xsr.icountlevel", translate_xsr, (uint32_t[]){ICOUNTLEVEL} },
+    { "xsr.intclear", translate_xsr, (uint32_t[]){INTCLEAR} },
+    { "xsr.intenable", translate_xsr, (uint32_t[]){INTENABLE} },
+    { "xsr.interrupt", translate_xsr, (uint32_t[]){INTSET} },
+    { "xsr.intset", translate_xsr, (uint32_t[]){INTSET} },
+    { "xsr.itlbcfg", translate_xsr, (uint32_t[]){ITLBCFG} },
+    { "xsr.lbeg", translate_xsr, (uint32_t[]){LBEG} },
+    { "xsr.lcount", translate_xsr, (uint32_t[]){LCOUNT} },
+    { "xsr.lend", translate_xsr, (uint32_t[]){LEND} },
+    { "xsr.litbase", translate_xsr, (uint32_t[]){LITBASE} },
+    { "xsr.m0", translate_xsr, (uint32_t[]){MR} },
+    { "xsr.m1", translate_xsr, (uint32_t[]){MR + 1} },
+    { "xsr.m2", translate_xsr, (uint32_t[]){MR + 2} },
+    { "xsr.m3", translate_xsr, (uint32_t[]){MR + 3} },
+    { "xsr.memctl", translate_xsr, (uint32_t[]){MEMCTL} },
+    { "xsr.misc0", translate_xsr, (uint32_t[]){MISC} },
+    { "xsr.misc1", translate_xsr, (uint32_t[]){MISC + 1} },
+    { "xsr.misc2", translate_xsr, (uint32_t[]){MISC + 2} },
+    { "xsr.misc3", translate_xsr, (uint32_t[]){MISC + 3} },
+    { "xsr.prid", translate_xsr, (uint32_t[]){PRID} },
+    { "xsr.ps", translate_xsr, (uint32_t[]){PS} },
+    { "xsr.ptevaddr", translate_xsr, (uint32_t[]){PTEVADDR} },
+    { "xsr.rasid", translate_xsr, (uint32_t[]){RASID} },
+    { "xsr.sar", translate_xsr, (uint32_t[]){SAR} },
+    { "xsr.scompare1", translate_xsr, (uint32_t[]){SCOMPARE1} },
+    { "xsr.vecbase", translate_xsr, (uint32_t[]){VECBASE} },
+    { "xsr.windowbase", translate_xsr, (uint32_t[]){WINDOW_BASE} },
+    { "xsr.windowstart", translate_xsr, (uint32_t[]){WINDOW_START} },
+};
+
+const XtensaOpcodeTranslators core_opcodes = {
+    .num_translators = ARRAY_SIZE(core_map),
+    .translator = core_map,
+};
+
+static int compare_opcode_map(const void *a, const void *b)
+{
+    return strcmp((const char *)a,
+                  ((const XtensaOpcodeMap *)b)->name);
+}
+
+XtensaOpcodeMap *
+xtensa_find_opcode_map(const XtensaOpcodeTranslators *t,
+                       const char *name)
+{
+    XtensaOpcodeMap *map;
+
+    if (!t) {
+        t = &core_opcodes;
+    }
+    map = bsearch(name, t->translator, t->num_translators,
+                  sizeof(XtensaOpcodeMap), compare_opcode_map);
+    return map;
 }
