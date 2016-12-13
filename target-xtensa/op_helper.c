@@ -410,6 +410,7 @@ void HELPER(update_ccount)(CPUXtensaState *env)
     env->sregs[CCOUNT] = env->ccount_base +
         (uint32_t)((now - env->time_base) *
                    env->config->clock_freq_khz / 1000000);
+    //fprintf(stderr, "CCOUNT: 0x%08x (%016lx)\n", env->sregs[CCOUNT], now);
 }
 
 void HELPER(update_ccompare)(CPUXtensaState *env, uint32_t i)
@@ -418,6 +419,12 @@ void HELPER(update_ccompare)(CPUXtensaState *env, uint32_t i)
 
     HELPER(update_ccount)(env);
     dcc = (uint64_t)(env->sregs[CCOMPARE + i] - env->sregs[CCOUNT] - 1) + 1;
+    //fprintf(stderr, "CCOMPARE%d: 0x%08x (%016lx)\n", i, env->sregs[CCOMPARE + i],
+    //        env->ccount_time + (dcc * 1000000) / env->config->clock_freq_khz);
+    //fprintf(stderr, "now: %016lx, delta: %016lx\n",
+    //        env->ccount_time, (dcc * 1000000) / env->config->clock_freq_khz);
+    env->ccompare[i].target = env->ccount_time +
+        (dcc * 1000000) / env->config->clock_freq_khz;
     timer_mod(env->ccompare[i].timer,
               env->ccount_time + (dcc * 1000000) / env->config->clock_freq_khz);
 }

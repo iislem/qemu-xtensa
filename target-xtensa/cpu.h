@@ -303,6 +303,7 @@ typedef struct XtensaGdbRegmap {
 
 typedef struct XtensaCcompareTimer {
     struct CPUXtensaState *env;
+    uint64_t target;
     QEMUTimer *timer;
 } XtensaCcompareTimer;
 

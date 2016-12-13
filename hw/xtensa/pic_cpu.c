@@ -87,7 +87,10 @@ static void xtensa_ccompare_cb(void *opaque)
     XtensaCcompareTimer *ccompare = opaque;
     CPUXtensaState *env = ccompare->env;
     unsigned i = ccompare - env->ccompare;
+//    uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
+//    fprintf(stderr, "*CCOMPARE%d IRQ (target: %016lx, now: %016lx, miss: %016lx)\n",
+//            i, ccompare->target, now, now - ccompare->target);
     xtensa_timer_irq(env, i, 1);
 }
 
