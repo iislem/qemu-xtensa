@@ -201,7 +201,7 @@ aio_compute_timeout(AioContext *ctx)
         }
     }
 
-    deadline = timerlistgroup_deadline_ns(&ctx->tlg);
+    deadline = timerlistgroup_deadline_ns(&ctx->tlg, false);
     if (deadline == 0) {
         return 0;
     } else {
@@ -240,7 +240,7 @@ aio_ctx_check(GSource *source)
             return true;
         }
     }
-    return aio_pending(ctx) || (timerlistgroup_deadline_ns(&ctx->tlg) == 0);
+    return aio_pending(ctx) || (timerlistgroup_deadline_ns(&ctx->tlg, false) == 0);
 }
 
 static gboolean
