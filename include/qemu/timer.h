@@ -398,7 +398,7 @@ bool timerlistgroup_run_timers(QEMUTimerListGroup *tlg);
  * Returns: the deadline in nanoseconds or -1 if no
  * timers are to expire.
  */
-int64_t timerlistgroup_deadline_ns(QEMUTimerListGroup *tlg);
+int64_t timerlistgroup_deadline_ns(QEMUTimerListGroup *tlg, bool all);
 
 /*
  * QEMUTimer

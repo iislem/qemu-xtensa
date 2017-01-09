@@ -503,7 +503,7 @@ int main_loop_wait(int nonblocking)
 
     timeout_ns = qemu_soonest_timeout(timeout_ns,
                                       timerlistgroup_deadline_ns(
-                                          &main_loop_tlg));
+                                          &main_loop_tlg, true));
 
     ret = os_host_main_loop_wait(timeout_ns);
 #ifdef CONFIG_SLIRP
