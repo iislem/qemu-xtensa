@@ -216,7 +216,7 @@ static void lx_init(const LxBoardDesc *board, MachineState *machine)
     MemoryRegion *system_memory = get_system_memory();
     XtensaCPU *cpu = NULL;
     CPUXtensaState *env = NULL;
-    XtensaMx *mx = NULL;
+    XtensaMxPic *mx = NULL;
     XtensaIRQController *ic;
     MemoryRegion *ram, *rom, *system_io;
     DriveInfo *dinfo;
@@ -234,8 +234,8 @@ static void lx_init(const LxBoardDesc *board, MachineState *machine)
     }
 
     if (smp_cpus > 1) {
-        mx = xtensa_mx_init(2);
-        qemu_register_reset(xtensa_mx_reset, mx);
+        mx = xtensa_mx_pic_init(31);
+        qemu_register_reset(xtensa_mx_pic_reset, mx);
     }
     for (n = 0; n < smp_cpus; n++) {
         cpu = cpu_xtensa_init(cpu_model);
@@ -247,7 +247,7 @@ static void lx_init(const LxBoardDesc *board, MachineState *machine)
         env = &cpu->env;
 
         if (mx) {
-            xtensa_mx_register_env(mx, env);
+            xtensa_mx_pic_register_env(mx, env);
         }
         env->sregs[PRID] = n;
         xtensa_select_static_vectors(env, n != 0);
@@ -258,7 +258,7 @@ static void lx_init(const LxBoardDesc *board, MachineState *machine)
         cpu_reset(CPU(cpu));
     }
     if (smp_cpus > 1) {
-        ic = xtensa_mx_get_irq_controller(mx);
+        ic = xtensa_mx_pic_get_irq_controller(mx);
     } else {
         ic = xtensa_env_get_irq_controller(env);
     }

@@ -456,8 +456,8 @@ int xtensa_cpu_gdb_write_register(CPUState *cpu, uint8_t *buf, int reg);
 void xtensa_cpu_do_unaligned_access(CPUState *cpu, vaddr addr,
                                     MMUAccessType access_type,
                                     int mmu_idx, uintptr_t retaddr);
-struct XtensaMx;
-typedef struct XtensaMx XtensaMx;
+struct XtensaMxPic;
+typedef struct XtensaMxPic XtensaMxPic;
 
 #define cpu_signal_handler cpu_xtensa_signal_handler
 #define cpu_list xtensa_cpu_list
@@ -472,10 +472,10 @@ XtensaCPU *cpu_xtensa_init(const char *cpu_model);
 
 #define cpu_init(cpu_model) CPU(cpu_xtensa_init(cpu_model))
 
-XtensaMx *xtensa_mx_init(unsigned n_extint);
-void xtensa_mx_reset(void *opaque);
-void xtensa_mx_register_env(XtensaMx *mx, CPUXtensaState *env);
-XtensaIRQController *xtensa_mx_get_irq_controller(XtensaMx *mx);
+XtensaMxPic *xtensa_mx_pic_init(unsigned n_extint);
+void xtensa_mx_pic_reset(void *opaque);
+void xtensa_mx_pic_register_env(XtensaMxPic *mx, CPUXtensaState *env);
+XtensaIRQController *xtensa_mx_pic_get_irq_controller(XtensaMxPic *mx);
 static inline XtensaIRQController *xtensa_env_get_irq_controller(
         CPUXtensaState *env)
 {
