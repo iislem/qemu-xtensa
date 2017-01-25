@@ -1293,11 +1293,14 @@ static void disas_xtensa_insn(CPUXtensaState *env, DisasContext *dc)
                         break;
 
                     case 1: /*SIMCALL*/
+#ifndef CONFIG_USER_ONLY
                         if (semihosting_enabled()) {
                             if (gen_check_privilege(dc)) {
                                 gen_helper_simcall(cpu_env);
                             }
-                        } else {
+                        } else
+#endif
+                        {
                             qemu_log_mask(LOG_GUEST_ERROR, "SIMCALL but semihosting is disabled\n");
                             gen_exception_cause(dc, ILLEGAL_INSTRUCTION_CAUSE);
                         }

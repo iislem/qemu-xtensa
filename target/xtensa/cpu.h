@@ -565,6 +565,7 @@ static inline uint32_t xtensa_replicate_windowstart(CPUXtensaState *env)
 #define MMU_MODE1_SUFFIX _ring1
 #define MMU_MODE2_SUFFIX _ring2
 #define MMU_MODE3_SUFFIX _ring3
+#define MMU_USER_IDX 3
 
 static inline int cpu_mmu_index(CPUXtensaState *env, bool ifetch)
 {

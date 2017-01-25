@@ -3781,6 +3781,14 @@ void cpu_loop(CPUHPPAState *env)
 
 #endif /* TARGET_HPPA */
 
+#ifdef TARGET_XTENSA
+
+void cpu_loop(CPUXtensaState *env)
+{
+}
+
+#endif /* TARGET_XTENSA */
+
 THREAD CPUState *thread_cpu;
 
 bool qemu_cpu_is_self(CPUState *cpu)
@@ -4846,6 +4854,14 @@ int main(int argc, char **argv, char **envp)
         }
         env->iaoq_f = regs->iaoq[0];
         env->iaoq_b = regs->iaoq[1];
+    }
+#elif defined(TARGET_XTENSA)
+    {
+        int i;
+        for (i = 0; i < 16; ++i) {
+            env->regs[i] = regs->areg[i];
+        }
+        env->pc = regs->pc;
     }
 #else
 #error unsupported target CPU

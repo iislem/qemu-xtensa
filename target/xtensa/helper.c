@@ -125,9 +125,11 @@ XtensaCPU *cpu_xtensa_init(const char *cpu_model)
     }
 
     cpu = XTENSA_CPU(object_new(object_class_get_name(oc)));
+#ifndef CONFIG_USER_ONLY
     env = &cpu->env;
 
     xtensa_irq_init(env);
+#endif
 
     object_property_set_bool(OBJECT(cpu), true, "realized", NULL);
 
@@ -161,6 +163,8 @@ hwaddr xtensa_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
     }
     return ~0;
 }
+
+#ifndef CONFIG_USER_ONLY
 
 static uint32_t relocated_vector(CPUXtensaState *env, uint32_t vector)
 {
@@ -270,6 +274,11 @@ void xtensa_cpu_do_interrupt(CPUState *cs)
     }
     check_interrupts(env);
 }
+#else
+void xtensa_cpu_do_interrupt(CPUState *cs)
+{
+}
+#endif
 
 bool xtensa_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {

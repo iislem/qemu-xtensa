@@ -12,7 +12,9 @@ DEF_HELPER_1(restore_owb, void, env)
 DEF_HELPER_2(movsp, void, env, i32)
 DEF_HELPER_2(wsr_lbeg, void, env, i32)
 DEF_HELPER_2(wsr_lend, void, env, i32)
+#ifndef CONFIG_USER_ONLY
 DEF_HELPER_1(simcall, void, env)
+#endif
 DEF_HELPER_1(dump_state, void, env)
 
 DEF_HELPER_3(waiti, void, env, i32, i32)

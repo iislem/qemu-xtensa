@@ -34,6 +34,8 @@
 #include "exec/address-spaces.h"
 #include "qemu/timer.h"
 
+#ifndef CONFIG_USER_ONLY
+
 void xtensa_cpu_do_unaligned_access(CPUState *cs,
         vaddr addr, MMUAccessType access_type,
         int mmu_idx, uintptr_t retaddr)
@@ -99,6 +101,15 @@ static void tb_invalidate_virtual_addr(CPUXtensaState *env, uint32_t vaddr)
         tb_invalidate_phys_addr(&address_space_memory, paddr);
     }
 }
+
+#else
+
+static void tb_invalidate_virtual_addr(CPUXtensaState *env, uint32_t vaddr)
+{
+    /* TODO */
+}
+
+#endif
 
 void HELPER(exception)(CPUXtensaState *env, uint32_t excp)
 {
@@ -376,6 +387,7 @@ void HELPER(dump_state)(CPUXtensaState *env)
 
 void HELPER(waiti)(CPUXtensaState *env, uint32_t pc, uint32_t intlevel)
 {
+#ifndef CONFIG_USER_ONLY
     CPUState *cpu;
 
     env->pc = pc;
@@ -390,6 +402,7 @@ void HELPER(waiti)(CPUXtensaState *env, uint32_t pc, uint32_t intlevel)
     cpu = CPU(xtensa_env_get_cpu(env));
     cpu->halted = 1;
     HELPER(exception)(env, EXCP_HLT);
+#endif
 }
 
 void HELPER(update_ccount)(CPUXtensaState *env)
@@ -426,7 +439,9 @@ void HELPER(update_ccompare)(CPUXtensaState *env, uint32_t i)
 
 void HELPER(check_interrupts)(CPUXtensaState *env)
 {
+#ifndef CONFIG_USER_ONLY
     check_interrupts(env);
+#endif
 }
 
 void HELPER(itlb_hit_test)(CPUXtensaState *env, uint32_t vaddr)
