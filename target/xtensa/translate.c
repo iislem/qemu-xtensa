@@ -1374,6 +1374,44 @@ static void translate_bz(DisasContext *dc, uint32_t arg[], uint32_t par[])
     }
 }
 
+enum {
+    BOOLEAN_AND,
+    BOOLEAN_ANDC,
+    BOOLEAN_OR,
+    BOOLEAN_ORC,
+    BOOLEAN_XOR,
+};
+
+static void translate_boolean(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    static void (* const op[])(TCGv_i32, TCGv_i32, TCGv_i32) = {
+        [BOOLEAN_AND] = tcg_gen_and_i32,
+        [BOOLEAN_ANDC] = tcg_gen_andc_i32,
+        [BOOLEAN_OR] = tcg_gen_or_i32,
+        [BOOLEAN_ORC] = tcg_gen_orc_i32,
+        [BOOLEAN_XOR] = tcg_gen_xor_i32,
+    };
+
+    TCGv_i32 tmp1 = tcg_temp_new_i32();
+    TCGv_i32 tmp2 = tcg_temp_new_i32();
+
+    tcg_gen_shri_i32(tmp1, cpu_SR[BR], arg[1]);
+    tcg_gen_shri_i32(tmp2, cpu_SR[BR], arg[2]);
+    op[par[0]](tmp1, tmp1, tmp2);
+    tcg_gen_deposit_i32(cpu_SR[BR], cpu_SR[BR], tmp1, arg[0], 1);
+    tcg_temp_free(tmp1);
+    tcg_temp_free(tmp2);
+}
+
+static void translate_bp(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    TCGv_i32 tmp = tcg_temp_new_i32();
+
+    tcg_gen_andi_i32(tmp, cpu_SR[BR], 1 << arg[0]);
+    gen_brcondi(dc, par[0], tmp, 0, arg[1]);
+    tcg_temp_free(tmp);
+}
+
 static void translate_break(DisasContext *dc, uint32_t arg[], uint32_t par[])
 {
     if (dc->debug) {
@@ -1732,6 +1770,21 @@ static void translate_movi(DisasContext *dc, uint32_t arg[], uint32_t par[])
 {
     if (gen_window_check1(dc, arg[0])) {
         tcg_gen_movi_i32(cpu_R[arg[0]], arg[1]);
+    }
+}
+
+static void translate_movp(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        TCGv_i32 zero = tcg_const_i32(0);
+        TCGv_i32 tmp = tcg_temp_new_i32();
+
+        tcg_gen_andi_i32(tmp, cpu_SR[BR], 1 << arg[2]);
+        tcg_gen_movcond_i32(par[0],
+                            cpu_R[arg[0]], tmp, zero,
+                            cpu_R[arg[1]], cpu_R[arg[0]]);
+        tcg_temp_free(tmp);
+        tcg_temp_free(zero);
     }
 }
 
@@ -2322,6 +2375,8 @@ static const XtensaOpcodeMap core_map[] = {
     { "all4", translate_all, (uint32_t[]){true, 4} },
     { "all8", translate_all, (uint32_t[]){true, 8} },
     { "and", translate_and },
+    { "andb", translate_boolean, (uint32_t[]){BOOLEAN_AND} },
+    { "andbc", translate_boolean, (uint32_t[]){BOOLEAN_ANDC} },
     { "any4", translate_all, (uint32_t[]){false, 4} },
     { "any8", translate_all, (uint32_t[]){false, 8} },
     { "ball", translate_ball, (uint32_t[]){TCG_COND_EQ} },
@@ -2334,6 +2389,7 @@ static const XtensaOpcodeMap core_map[] = {
     { "beqi", translate_bi, (uint32_t[]){TCG_COND_EQ} },
     { "beqz", translate_bz, (uint32_t[]){TCG_COND_EQ} },
     { "beqz.n", translate_bz, (uint32_t[]){TCG_COND_EQ} },
+    { "bf", translate_bp, (uint32_t[]){TCG_COND_EQ} },
     { "bge", translate_b, (uint32_t[]){TCG_COND_GE} },
     { "bgei", translate_bi, (uint32_t[]){TCG_COND_GE} },
     { "bgeu", translate_b, (uint32_t[]){TCG_COND_GEU} },
@@ -2352,6 +2408,7 @@ static const XtensaOpcodeMap core_map[] = {
     { "bnone", translate_bany, (uint32_t[]){TCG_COND_EQ} },
     { "break", translate_break, (uint32_t[]){DEBUGCAUSE_BI} },
     { "break.n", translate_break, (uint32_t[]){DEBUGCAUSE_BN} },
+    { "bt", translate_bp, (uint32_t[]){TCG_COND_NE} },
     { "call0", translate_call0 },
     { "call12", translate_callw, (uint32_t[]){3} },
     { "call4", translate_callw, (uint32_t[]){1} },
@@ -2415,12 +2472,14 @@ static const XtensaOpcodeMap core_map[] = {
     { "mov", translate_mov },
     { "mov.n", translate_mov },
     { "moveqz", translate_movcond, (uint32_t[]){TCG_COND_EQ} },
+    { "movf", translate_movp, (uint32_t[]){TCG_COND_EQ} },
     { "movgez", translate_movcond, (uint32_t[]){TCG_COND_GE} },
     { "movi", translate_movi },
     { "movi.n", translate_movi },
     { "movltz", translate_movcond, (uint32_t[]){TCG_COND_LT} },
     { "movnez", translate_movcond, (uint32_t[]){TCG_COND_NE} },
     { "movsp", translate_movsp },
+    { "movt", translate_movp, (uint32_t[]){TCG_COND_NE} },
     { "mul.aa.hh", translate_mac16, (uint32_t[]){MAC16_MUL, MAC16_AA, MAC16_HH, 0} },
     { "mul.aa.hl", translate_mac16, (uint32_t[]){MAC16_MUL, MAC16_AA, MAC16_HL, 0} },
     { "mul.aa.lh", translate_mac16, (uint32_t[]){MAC16_MUL, MAC16_AA, MAC16_LH, 0} },
@@ -2496,6 +2555,8 @@ static const XtensaOpcodeMap core_map[] = {
     { "nsa", translate_nsa },
     { "nsau", translate_nsau },
     { "or", translate_or },
+    { "orb", translate_boolean, (uint32_t[]){BOOLEAN_OR} },
+    { "orbc", translate_boolean, (uint32_t[]){BOOLEAN_ORC} },
     { "pdtlb", translate_ptlb, (uint32_t[]){true} },
     { "pitlb", translate_ptlb, (uint32_t[]){false} },
     { "quos", translate_quos, (uint32_t[]){true} },
@@ -2711,6 +2772,7 @@ static const XtensaOpcodeMap core_map[] = {
     { "wur.fsr", translate_wur, (uint32_t[]){FSR} },
     { "wur.threadptr", translate_wur, (uint32_t[]){THREADPTR} },
     { "xor", translate_xor },
+    { "xorb", translate_boolean, (uint32_t[]){BOOLEAN_XOR} },
     { "xsr.176", translate_xsr, (uint32_t[]){176} },
     { "xsr.208", translate_xsr, (uint32_t[]){208} },
     { "xsr.acchi", translate_xsr, (uint32_t[]){ACCHI} },
