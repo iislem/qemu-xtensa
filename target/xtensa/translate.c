@@ -2855,6 +2855,259 @@ const XtensaOpcodeTranslators core_opcodes = {
     .translator = core_map,
 };
 
+
+
+static void translate_abs_s(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_cpenable(dc, 0)) {
+        gen_helper_abs_s(cpu_FR[arg[0]], cpu_FR[arg[1]]);
+    }
+}
+
+static void translate_add_s(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_cpenable(dc, 0)) {
+        gen_helper_add_s(cpu_FR[arg[0]], cpu_env,
+                         cpu_FR[arg[1]], cpu_FR[arg[2]]);
+    }
+}
+
+enum {
+    COMPARE_UN,
+    COMPARE_OEQ,
+    COMPARE_UEQ,
+    COMPARE_OLT,
+    COMPARE_ULT,
+    COMPARE_OLE,
+    COMPARE_ULE,
+};
+
+static void translate_compare_s(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    static void (* const helper[])(TCGv_env env, TCGv_i32 bit,
+                                   TCGv_i32 s, TCGv_i32 t) = {
+        [COMPARE_UN] = gen_helper_un_s,
+        [COMPARE_OEQ] = gen_helper_oeq_s,
+        [COMPARE_UEQ] = gen_helper_ueq_s,
+        [COMPARE_OLT] = gen_helper_olt_s,
+        [COMPARE_ULT] = gen_helper_ult_s,
+        [COMPARE_OLE] = gen_helper_ole_s,
+        [COMPARE_ULE] = gen_helper_ule_s,
+    };
+
+    if (gen_check_cpenable(dc, 0)) {
+        TCGv_i32 bit = tcg_const_i32(1 << arg[0]);
+
+        helper[par[0]](cpu_env, bit, cpu_FR[arg[1]], cpu_FR[arg[2]]);
+        tcg_temp_free(bit);
+    }
+}
+
+static void translate_float_s(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, arg[1]) && gen_check_cpenable(dc, 0)) {
+        TCGv_i32 scale = tcg_const_i32(-arg[2]);
+
+        if (par[0]) {
+            gen_helper_uitof(cpu_FR[arg[0]], cpu_env, cpu_R[arg[1]], scale);
+        } else {
+            gen_helper_itof(cpu_FR[arg[0]], cpu_env, cpu_R[arg[1]], scale);
+        }
+        tcg_temp_free(scale);
+    }
+}
+
+static void translate_ftoi_s(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, arg[0]) && gen_check_cpenable(dc, 0)) {
+        TCGv_i32 rounding_mode = tcg_const_i32(par[0]);
+        TCGv_i32 scale = tcg_const_i32(arg[2]);
+
+        if (par[1]) {
+            gen_helper_ftoui(cpu_R[arg[0]], cpu_FR[arg[1]],
+                             rounding_mode, scale);
+        } else {
+            gen_helper_ftoi(cpu_R[arg[0]], cpu_FR[arg[1]],
+                            rounding_mode, scale);
+        }
+        tcg_temp_free(rounding_mode);
+        tcg_temp_free(scale);
+    }
+}
+
+static void translate_ldsti(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, arg[1]) && gen_check_cpenable(dc, 0)) {
+        TCGv_i32 addr = tcg_temp_new_i32();
+
+        tcg_gen_addi_i32(addr, cpu_R[arg[1]], arg[2]);
+        gen_load_store_alignment(dc, 2, addr, false);
+        if (par[0]) {
+            tcg_gen_qemu_st32(cpu_FR[arg[0]], addr, dc->cring);
+        } else {
+            tcg_gen_qemu_ld32u(cpu_FR[arg[0]], addr, dc->cring);
+        }
+        if (par[1]) {
+            tcg_gen_mov_i32(cpu_R[arg[1]], addr);
+        }
+        tcg_temp_free(addr);
+    }
+}
+
+static void translate_ldstx(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[1], arg[2]) && gen_check_cpenable(dc, 0)) {
+        TCGv_i32 addr = tcg_temp_new_i32();
+
+        tcg_gen_add_i32(addr, cpu_R[arg[1]], cpu_R[arg[2]]);
+        gen_load_store_alignment(dc, 2, addr, false);
+        if (par[0]) {
+            tcg_gen_qemu_st32(cpu_FR[arg[0]], addr, dc->cring);
+        } else {
+            tcg_gen_qemu_ld32u(cpu_FR[arg[0]], addr, dc->cring);
+        }
+        if (par[1]) {
+            tcg_gen_mov_i32(cpu_R[arg[1]], addr);
+        }
+        tcg_temp_free(addr);
+    }
+}
+
+static void translate_madd_s(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_cpenable(dc, 0)) {
+        gen_helper_madd_s(cpu_FR[arg[0]], cpu_env,
+                          cpu_FR[arg[0]], cpu_FR[arg[1]], cpu_FR[arg[2]]);
+    }
+}
+
+static void translate_mov_s(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_cpenable(dc, 0)) {
+        tcg_gen_mov_i32(cpu_FR[arg[0]], cpu_FR[arg[1]]);
+    }
+}
+
+static void translate_movcond_s(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, arg[2]) && gen_check_cpenable(dc, 0)) {
+        TCGv_i32 zero = tcg_const_i32(0);
+
+        tcg_gen_movcond_i32(par[0], cpu_FR[arg[0]],
+                            cpu_R[arg[2]], zero,
+                            cpu_FR[arg[1]], cpu_FR[arg[2]]);
+        tcg_temp_free(zero);
+    }
+}
+
+static void translate_movp_s(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_cpenable(dc, 0)) {
+        TCGv_i32 zero = tcg_const_i32(0);
+        TCGv_i32 tmp = tcg_temp_new_i32();
+
+        tcg_gen_andi_i32(tmp, cpu_SR[BR], 1 << arg[2]);
+        tcg_gen_movcond_i32(par[0],
+                            cpu_FR[arg[0]], tmp, zero,
+                            cpu_FR[arg[1]], cpu_FR[arg[0]]);
+        tcg_temp_free(tmp);
+        tcg_temp_free(zero);
+    }
+}
+
+static void translate_mul_s(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_cpenable(dc, 0)) {
+        gen_helper_mul_s(cpu_FR[arg[0]], cpu_env,
+                         cpu_FR[arg[1]], cpu_FR[arg[2]]);
+    }
+}
+
+static void translate_msub_s(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_cpenable(dc, 0)) {
+        gen_helper_msub_s(cpu_FR[arg[0]], cpu_env,
+                          cpu_FR[arg[0]], cpu_FR[arg[1]], cpu_FR[arg[2]]);
+    }
+}
+
+static void translate_neg_s(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_cpenable(dc, 0)) {
+        gen_helper_neg_s(cpu_FR[arg[0]], cpu_FR[arg[1]]);
+    }
+}
+
+static void translate_rfr_s(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, arg[0]) &&
+        gen_check_cpenable(dc, 0)) {
+        tcg_gen_mov_i32(cpu_R[arg[0]], cpu_FR[arg[1]]);
+    }
+}
+
+static void translate_sub_s(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_check_cpenable(dc, 0)) {
+        gen_helper_sub_s(cpu_FR[arg[0]], cpu_env,
+                         cpu_FR[arg[1]], cpu_FR[arg[2]]);
+    }
+}
+
+static void translate_wfr_s(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, arg[1]) &&
+        gen_check_cpenable(dc, 0)) {
+        tcg_gen_mov_i32(cpu_FR[arg[0]], cpu_R[arg[1]]);
+    }
+}
+
+static const XtensaOpcodeMap fpu2000_map[] = {
+    { "abs.s", translate_abs_s },
+    { "add.s", translate_add_s },
+    { "ceil.s", translate_ftoi_s, (uint32_t[]){float_round_up, false} },
+    { "float.s", translate_float_s, (uint32_t[]){false} },
+    { "floor.s", translate_ftoi_s, (uint32_t[]){float_round_down, false} },
+    { "lsi", translate_ldsti, (uint32_t[]){false, false} },
+    { "lsiu", translate_ldsti, (uint32_t[]){false, true} },
+    { "lsx", translate_ldstx, (uint32_t[]){false, false} },
+    { "lsxu", translate_ldstx, (uint32_t[]){false, true} },
+    { "madd.s", translate_madd_s },
+    { "mov.s", translate_mov_s },
+    { "moveqz.s", translate_movcond_s, (uint32_t[]){TCG_COND_EQ} },
+    { "movf.s", translate_movp_s, (uint32_t[]){TCG_COND_EQ} },
+    { "movgez.s", translate_movcond_s, (uint32_t[]){TCG_COND_GE} },
+    { "movltz.s", translate_movcond_s, (uint32_t[]){TCG_COND_LT} },
+    { "movnez.s", translate_movcond_s, (uint32_t[]){TCG_COND_NE} },
+    { "movt.s", translate_movp_s, (uint32_t[]){TCG_COND_NE} },
+    { "msub.s", translate_msub_s },
+    { "mul.s", translate_mul_s },
+    { "neg.s", translate_neg_s },
+    { "oeq.s", translate_compare_s, (uint32_t[]){COMPARE_OEQ} },
+    { "ole.s", translate_compare_s, (uint32_t[]){COMPARE_OLE} },
+    { "olt.s", translate_compare_s, (uint32_t[]){COMPARE_OLT} },
+    { "rfr.s", translate_rfr_s },
+    { "round.s", translate_ftoi_s, (uint32_t[]){float_round_nearest_even, false} },
+    { "ssi", translate_ldsti, (uint32_t[]){true, false} },
+    { "ssiu", translate_ldsti, (uint32_t[]){true, true} },
+    { "ssx", translate_ldstx, (uint32_t[]){true, false} },
+    { "ssxu", translate_ldstx, (uint32_t[]){true, true} },
+    { "sub.s", translate_sub_s },
+    { "trunc.s", translate_ftoi_s, (uint32_t[]){float_round_to_zero, false} },
+    { "ueq.s", translate_compare_s, (uint32_t[]){COMPARE_UEQ} },
+    { "ufloat.s", translate_float_s, (uint32_t[]){true} },
+    { "ule.s", translate_compare_s, (uint32_t[]){COMPARE_ULE} },
+    { "ult.s", translate_compare_s, (uint32_t[]){COMPARE_ULT} },
+    { "un.s", translate_compare_s, (uint32_t[]){COMPARE_UN} },
+    { "utrunc.s", translate_ftoi_s, (uint32_t[]){float_round_to_zero, true} },
+    { "wfr.s", translate_wfr_s },
+};
+
+const XtensaOpcodeTranslators fpu2000_opcodes = {
+    .num_translators = ARRAY_SIZE(fpu2000_map),
+    .translator = fpu2000_map,
+};
+
 static int compare_opcode_map(const void *a, const void *b)
 {
     return strcmp((const char *)a,
