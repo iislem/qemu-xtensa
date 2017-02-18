@@ -2088,6 +2088,15 @@ static void translate_s32e(DisasContext *dc, uint32_t arg[], uint32_t par[])
     }
 }
 
+static void translate_salt(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check3(dc, arg[0], arg[1], arg[2])) {
+        tcg_gen_setcond_i32(par[0],
+                            cpu_R[arg[0]],
+                            cpu_R[arg[1]], cpu_R[arg[2]]);
+    }
+}
+
 static void translate_sext(DisasContext *dc, uint32_t arg[], uint32_t par[])
 {
     if (gen_window_check2(dc, arg[0], arg[1])) {
@@ -2657,6 +2666,8 @@ static const XtensaOpcodeMap core_map[] = {
     { "s32nb", translate_ldst, (uint32_t[]){MO_TEUL, false, true} },
     { "s32ri", translate_ldst, (uint32_t[]){MO_TEUL, true, true} },
     { "s8i", translate_ldst, (uint32_t[]){MO_UB, false, true} },
+    { "salt", translate_salt, (uint32_t[]){TCG_COND_LT} },
+    { "saltu", translate_salt, (uint32_t[]){TCG_COND_LTU} },
     { "sext", translate_sext },
     { "simcall", translate_simcall },
     { "sll", translate_sll },
