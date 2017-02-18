@@ -201,6 +201,7 @@ static const XtensaReg sregnames[256] = {
 };
 
 static const XtensaReg uregnames[256] = {
+    [EXPSTATE] = XTENSA_REG_BITS("EXPSTATE", XTENSA_OPTION_ALL),
     [THREADPTR] = XTENSA_REG("THREADPTR", XTENSA_OPTION_THREAD_POINTER),
     [FCR] = XTENSA_REG("FCR", XTENSA_OPTION_FP_COPROCESSOR),
     [FSR] = XTENSA_REG("FSR", XTENSA_OPTION_FP_COPROCESSOR),
@@ -1453,6 +1454,12 @@ static void translate_clamps(DisasContext *dc, uint32_t arg[], uint32_t par[])
     }
 }
 
+static void translate_clrb_expstate(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    /* TODO: GPIO32 may be a part of coprocessor */
+    tcg_gen_andi_i32(cpu_UR[EXPSTATE], cpu_UR[EXPSTATE], ~(1u << arg[0]));
+}
+
 /* par[0]: privileged, par[1]: check memory access */
 static void translate_dcache(DisasContext *dc, uint32_t arg[], uint32_t par[])
 {
@@ -1917,6 +1924,14 @@ static void translate_quou(DisasContext *dc, uint32_t arg[], uint32_t par[])
     }
 }
 
+static void translate_read_impwire(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check1(dc, arg[0])) {
+        /* TODO: GPIO32 may be a part of coprocessor */
+        tcg_gen_movi_i32(cpu_R[arg[0]], 0);
+    }
+}
+
 static void translate_rer(DisasContext *dc, uint32_t arg[], uint32_t par[])
 {
     if (gen_check_privilege(dc) &&
@@ -2046,6 +2061,12 @@ static void translate_rur(DisasContext *dc, uint32_t arg[], uint32_t par[])
             qemu_log_mask(LOG_UNIMP, "RUR %d not implemented, ", par[0]);
         }
     }
+}
+
+static void translate_setb_expstate(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    /* TODO: GPIO32 may be a part of coprocessor */
+    tcg_gen_ori_i32(cpu_UR[EXPSTATE], cpu_UR[EXPSTATE], 1u << arg[0]);
 }
 
 static void translate_s32c1i(DisasContext *dc, uint32_t arg[], uint32_t par[])
@@ -2313,6 +2334,14 @@ static void translate_wer(DisasContext *dc, uint32_t arg[], uint32_t par[])
     }
 }
 
+static void translate_wrmsk_expstate(DisasContext *dc, uint32_t arg[], uint32_t par[])
+{
+    if (gen_window_check2(dc, arg[0], arg[1])) {
+        /* TODO: GPIO32 may be a part of coprocessor */
+        tcg_gen_and_i32(cpu_UR[EXPSTATE], cpu_R[arg[0]], cpu_R[arg[1]]);
+    }
+}
+
 static void translate_wsr(DisasContext *dc, uint32_t arg[], uint32_t par[])
 {
     if ((par[0] < 64 || gen_check_privilege(dc)) &&
@@ -2412,6 +2441,7 @@ static const XtensaOpcodeMap core_map[] = {
     { "callx4", translate_callxw, (uint32_t[]){1} },
     { "callx8", translate_callxw, (uint32_t[]){2} },
     { "clamps", translate_clamps },
+    { "clrb_expstate", translate_clrb_expstate },
     { "depbits", translate_depbits },
     { "dhi", translate_dcache, (uint32_t[]){true, true} },
     { "dhu", translate_dcache, (uint32_t[]){true, true} },
@@ -2560,6 +2590,7 @@ static const XtensaOpcodeMap core_map[] = {
     { "quou", translate_quou, (uint32_t[]){true} },
     { "rdtlb0", translate_rtlb, (uint32_t[]){true, 0} },
     { "rdtlb1", translate_rtlb, (uint32_t[]){true, 1} },
+    { "read_impwire", translate_read_impwire },
     { "rems", translate_quos, (uint32_t[]){false} },
     { "remu", translate_quou, (uint32_t[]){false} },
     { "rer", translate_rer },
@@ -2655,6 +2686,7 @@ static const XtensaOpcodeMap core_map[] = {
     { "rsr.windowbase", translate_rsr, (uint32_t[]){WINDOW_BASE} },
     { "rsr.windowstart", translate_rsr, (uint32_t[]){WINDOW_START} },
     { "rsync", translate_nop },
+    { "rur.expstate", translate_rur, (uint32_t[]){EXPSTATE} },
     { "rur.fcr", translate_rur, (uint32_t[]){FCR} },
     { "rur.fsr", translate_rur, (uint32_t[]){FSR} },
     { "rur.threadptr", translate_rur, (uint32_t[]){THREADPTR} },
@@ -2668,6 +2700,7 @@ static const XtensaOpcodeMap core_map[] = {
     { "s8i", translate_ldst, (uint32_t[]){MO_UB, false, true} },
     { "salt", translate_salt, (uint32_t[]){TCG_COND_LT} },
     { "saltu", translate_salt, (uint32_t[]){TCG_COND_LTU} },
+    { "setb_expstate", translate_setb_expstate },
     { "sext", translate_sext },
     { "simcall", translate_simcall },
     { "sll", translate_sll },
@@ -2695,6 +2728,7 @@ static const XtensaOpcodeMap core_map[] = {
     { "wdtlb", translate_wtlb, (uint32_t[]){true} },
     { "wer", translate_wer },
     { "witlb", translate_wtlb, (uint32_t[]){false} },
+    { "wrmsk_expstate", translate_wrmsk_expstate },
     { "wsr.176", translate_wsr, (uint32_t[]){176} },
     { "wsr.208", translate_wsr, (uint32_t[]){208} },
     { "wsr.acchi", translate_wsr, (uint32_t[]){ACCHI} },
@@ -2772,6 +2806,7 @@ static const XtensaOpcodeMap core_map[] = {
     { "wsr.vecbase", translate_wsr, (uint32_t[]){VECBASE} },
     { "wsr.windowbase", translate_wsr, (uint32_t[]){WINDOW_BASE} },
     { "wsr.windowstart", translate_wsr, (uint32_t[]){WINDOW_START} },
+    { "wur.expstate", translate_wur, (uint32_t[]){EXPSTATE} },
     { "wur.fcr", translate_wur, (uint32_t[]){FCR} },
     { "wur.fsr", translate_wur, (uint32_t[]){FSR} },
     { "wur.threadptr", translate_wur, (uint32_t[]){THREADPTR} },
