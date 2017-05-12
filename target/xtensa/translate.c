@@ -918,7 +918,7 @@ static inline unsigned xtensa_op0_insn_len(DisasContext *dc, uint8_t op0)
 static void disas_xtensa_insn(CPUXtensaState *env, DisasContext *dc)
 {
     xtensa_isa isa = dc->config->isa;
-    unsigned char b[16] = {cpu_ldub_code(env, dc->pc)};
+    unsigned char b[MAX_INSN_LENGTH] = {cpu_ldub_code(env, dc->pc)};
     unsigned len = xtensa_op0_insn_len(dc, b[0]);
     xtensa_format fmt;
     unsigned slot, slots;

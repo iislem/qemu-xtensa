@@ -209,6 +209,7 @@ enum {
 #define MEMCTL_DSNP 0x2
 #define MEMCTL_IL0EN 0x1
 
+#define MAX_INSN_LENGTH 64
 #define MAX_NAREG 64
 #define MAX_NINTERRUPT 32
 #define MAX_NLEVEL 6
